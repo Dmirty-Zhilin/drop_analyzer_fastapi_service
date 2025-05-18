@@ -12,6 +12,11 @@ if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
+# Определяем исключение, если оно отсутствует в библиотеке
+class NoWaybackMachineCDXServerAvailable(WaybackError):
+    """Exception raised when the Wayback Machine CDX server is not available."""
+    pass
+
 class WaybackService:
     def __init__(self, user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"):
         self.user_agent = user_agent
@@ -159,4 +164,3 @@ async def main_test():
 
 if __name__ == "__main__":
     asyncio.run(main_test())
-
