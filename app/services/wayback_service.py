@@ -10,19 +10,6 @@ if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-# Определяем собственные исключения для работы с Wayback Machine
-class WaybackError(Exception):
-    """Base exception for Wayback Machine errors."""
-    pass
-
-class NoCDXRecordFound(WaybackError):
-    """Exception raised when no CDX records are found for a domain."""
-    pass
-
-class NoWaybackMachineCDXServerAvailable(WaybackError):
-    """Exception raised when the Wayback Machine CDX server is not available."""
-    pass
-
 class WaybackService:
     def __init__(self, user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"):
         self.user_agent = user_agent
@@ -31,6 +18,7 @@ class WaybackService:
             import waybackpy
             self.waybackpy_available = True
             self.waybackpy = waybackpy
+            logger.info(f"waybackpy version {waybackpy.__version__} is available")
         except ImportError:
             logger.warning("waybackpy library is not installed. Using fallback implementation.")
             self.waybackpy_available = False
@@ -50,61 +38,71 @@ class WaybackService:
         }
 
         if not self.waybackpy_available:
-            summary["error"] = "waybackpy library is not installed. Please install it using: pip install waybackpy"
+            summary["error"] = "waybackpy library is not installed. Please install it using: pip install waybackpy==3.0.6"
             logger.error(f"waybackpy library not available for domain {domain}")
             return summary
 
         try:
-            # Используем только класс WaybackMachine, который есть во всех версиях библиотеки
+            # Используем WaybackMachineCDXServerAPI для получения снимков
             loop = asyncio.get_event_loop()
             
-            def blocking_availability_check():
+            def blocking_cdx_api_check():
                 try:
-                    # Используем простую проверку доступности через WaybackMachine
-                    wayback = self.waybackpy.WaybackMachine(domain, self.user_agent)
-                    # Проверяем доступность, но не выполняем полный запрос
-                    return {"message": "WaybackMachine object created successfully."}
+                    # Создаем URL с протоколом, если его нет
+                    url = domain if domain.startswith(('http://', 'https://')) else f"http://{domain}"
+                    
+                    # Используем CDX API для получения снимков
+                    cdx_api = self.waybackpy.WaybackMachineCDXServerAPI(
+                        url=url,
+                        user_agent=self.user_agent
+                    )
+                    
+                    # Получаем список снимков
+                    snapshots = list(cdx_api.snapshots())
+                    
+                    if not snapshots:
+                        return {"message": "No snapshots found for this domain."}
+                    
+                    # Получаем первый (самый старый) и последний (самый новый) снимки
+                    # В зависимости от сортировки по умолчанию
+                    oldest_snapshot = snapshots[0]
+                    newest_snapshot = snapshots[-1]
+                    
+                    return {
+                        "total_snapshots": len(snapshots),
+                        "oldest_snapshot": {
+                            "timestamp": oldest_snapshot.timestamp,
+                            "archive_url": oldest_snapshot.archive_url
+                        },
+                        "newest_snapshot": {
+                            "timestamp": newest_snapshot.timestamp,
+                            "archive_url": newest_snapshot.archive_url
+                        }
+                    }
                 except Exception as e:
-                    logger.warning(f"Wayback Machine availability check for {domain} failed: {e}")
+                    logger.warning(f"Wayback Machine CDX API check for {domain} failed: {e}")
                     return {"error": str(e)}
 
-            summary["availability_api_response"] = await loop.run_in_executor(None, blocking_availability_check)
-
-            def blocking_oldest_snapshot():
-                try:
-                    wayback = self.waybackpy.WaybackMachine(domain, self.user_agent)
-                    return wayback.oldest()
-                except Exception as e:
-                    logger.warning(f"Error fetching oldest snapshot for {domain}: {e}")
-                    return {"error_fetching_oldest": str(e)}
-
-            oldest_snapshot = await loop.run_in_executor(None, blocking_oldest_snapshot)
-            if oldest_snapshot and not isinstance(oldest_snapshot, dict):
-                summary["first_snapshot_date"] = oldest_snapshot.timestamp.isoformat() if hasattr(oldest_snapshot, 'timestamp') and oldest_snapshot.timestamp else None
-                summary["oldest_snapshot_url"] = oldest_snapshot.archive_url if hasattr(oldest_snapshot, 'archive_url') else None
-            elif isinstance(oldest_snapshot, dict) and "error_fetching_oldest" in oldest_snapshot:
-                summary["error"] = oldest_snapshot['error_fetching_oldest']
-
-            def blocking_newest_snapshot():
-                try:
-                    wayback = self.waybackpy.WaybackMachine(domain, self.user_agent)
-                    return wayback.newest()
-                except Exception as e:
-                    logger.warning(f"Error fetching newest snapshot for {domain}: {e}")
-                    return {"error_fetching_newest": str(e)}
-
-            newest_snapshot = await loop.run_in_executor(None, blocking_newest_snapshot)
-            if newest_snapshot and not isinstance(newest_snapshot, dict):
-                summary["last_snapshot_date"] = newest_snapshot.timestamp.isoformat() if hasattr(newest_snapshot, 'timestamp') and newest_snapshot.timestamp else None
-                summary["newest_snapshot_url"] = newest_snapshot.archive_url if hasattr(newest_snapshot, 'archive_url') else None
-            elif isinstance(newest_snapshot, dict) and "error_fetching_newest" in newest_snapshot:
-                if summary["error"]:
-                    summary["error"] += f"; {newest_snapshot['error_fetching_newest']}"
-                else:
-                    summary["error"] = newest_snapshot['error_fetching_newest']
-
-            if not oldest_snapshot and not newest_snapshot and not summary["error"]:
-                summary["error"] = "No snapshots found via oldest/newest methods."
+            # Выполняем блокирующий вызов в отдельном потоке
+            cdx_result = await loop.run_in_executor(None, blocking_cdx_api_check)
+            
+            # Обрабатываем результат
+            if "error" in cdx_result:
+                summary["error"] = cdx_result["error"]
+                summary["availability_api_response"] = {"error": cdx_result["error"]}
+            else:
+                summary["availability_api_response"] = {"message": "CDX API check successful"}
+                
+                if "oldest_snapshot" in cdx_result:
+                    summary["first_snapshot_date"] = cdx_result["oldest_snapshot"]["timestamp"]
+                    summary["oldest_snapshot_url"] = cdx_result["oldest_snapshot"]["archive_url"]
+                
+                if "newest_snapshot" in cdx_result:
+                    summary["last_snapshot_date"] = cdx_result["newest_snapshot"]["timestamp"]
+                    summary["newest_snapshot_url"] = cdx_result["newest_snapshot"]["archive_url"]
+                
+                if "total_snapshots" in cdx_result:
+                    summary["total_snapshots"] = cdx_result["total_snapshots"]
 
         except Exception as e:
             summary["error"] = f"An unexpected error occurred: {str(e)}"
@@ -121,7 +119,7 @@ class WaybackService:
         try:
             # Для простоты возвращаем заглушку, так как этот метод не используется в основном коде
             logger.warning("get_content_from_snapshot is a placeholder and does not fetch live content.")
-            return f"Placeholder content for {archive_url}. Implement with aiohttp for actual fetching."
+            return f"Placeholder content for {archive_url}. Implement with requests or aiohttp for actual fetching."
         except Exception as e:
             logger.error(f"Error fetching content from snapshot {archive_url}: {e}")
             return None
