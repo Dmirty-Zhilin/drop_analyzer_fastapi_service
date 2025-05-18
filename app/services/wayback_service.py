@@ -1,6 +1,6 @@
 import asyncio
 import waybackpy
-from waybackpy.exceptions import WaybackError, NoCDXRecordFound, NoWaybackMachineCDXServerAvailable
+from waybackpy.exceptions import WaybackError, NoCDXRecordFound
 from typing import Dict, Any, Optional, List
 import datetime
 import logging

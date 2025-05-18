@@ -4,5 +4,5 @@ python-dotenv
 celery
 redis
 aiohttp
-waybackpy
+waybackpy==3.0.6
 # Add other core dependencies here as needed
