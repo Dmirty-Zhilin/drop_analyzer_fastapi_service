@@ -7,7 +7,7 @@ app = FastAPI(title="Drop Domain Analyzer API", version="0.1.0")
 # Добавляем CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://c0wokkgcgoc40kw8go4scs8w.45.155.207.218.sslip.io"],  # Домен фронтенда
+    allow_origins=["https://qo8k8k0c48sk080ccwgswocg.alettidesign.ru"],  # Домен фронтенда
     allow_credentials=True,
     allow_methods=["*"],  # Разрешаем все HTTP методы
     allow_headers=["*"],  # Разрешаем все заголовки
