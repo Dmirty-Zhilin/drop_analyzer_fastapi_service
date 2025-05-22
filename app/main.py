@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.endpoints import analysis # Import the analysis router
+from app.api.endpoints import analysis, reports  # Import the reports router
 
 app = FastAPI(title="Drop Domain Analyzer API", version="0.1.0")
 
@@ -20,6 +20,8 @@ async def read_root():
 # Include the analysis router
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["Analysis Tasks"])
 
+# Include the reports router
+app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
 
 if __name__ == "__main__":
     import uvicorn
