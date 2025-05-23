@@ -34,7 +34,20 @@ class WaybackService:
             "availability_api_response": None,
             "oldest_snapshot_url": None,
             "newest_snapshot_url": None,
-            "error": None
+            "error": None,
+            # Добавляем расширенные метрики для полного отчета
+            "has_snapshot": False,
+            "availability_ts": None,
+            "first_snapshot": None,
+            "last_snapshot": None,
+            "avg_interval_days": None,
+            "max_gap_days": None,
+            "years_covered": None,
+            "snapshots_per_year": None,
+            "unique_versions": None,
+            "is_good": False,
+            "recommended": False,
+            "timemap_count": 0
         }
 
         if not self.waybackpy_available:
@@ -68,7 +81,42 @@ class WaybackService:
                     oldest_snapshot = snapshots[0]
                     newest_snapshot = snapshots[-1]
                     
-                    return {
+                    # Расчет дополнительных метрик
+                    snapshot_dates = []
+                    unique_digests = set()
+                    
+                    for snapshot in snapshots:
+                        try:
+                            # Преобразуем timestamp в datetime объект
+                            date = datetime.datetime.strptime(snapshot.timestamp, "%Y%m%d%H%M%S")
+                            snapshot_dates.append(date)
+                            
+                            # Собираем уникальные версии по digest
+                            if hasattr(snapshot, 'digest'):
+                                unique_digests.add(snapshot.digest)
+                        except (ValueError, AttributeError) as e:
+                            logger.warning(f"Error processing snapshot timestamp {snapshot.timestamp}: {e}")
+                    
+                    # Сортируем даты для правильного расчета интервалов
+                    snapshot_dates.sort()
+                    
+                    # Расчет интервалов между снимками
+                    intervals = []
+                    for i in range(1, len(snapshot_dates)):
+                        delta = (snapshot_dates[i] - snapshot_dates[i-1]).days
+                        intervals.append(delta)
+                    
+                    # Расчет лет покрытия
+                    years = set()
+                    snapshots_per_year = {}
+                    
+                    for date in snapshot_dates:
+                        year = date.year
+                        years.add(year)
+                        snapshots_per_year[year] = snapshots_per_year.get(year, 0) + 1
+                    
+                    # Формируем расширенный результат
+                    result = {
                         "total_snapshots": len(snapshots),
                         "oldest_snapshot": {
                             "timestamp": oldest_snapshot.timestamp,
@@ -77,8 +125,16 @@ class WaybackService:
                         "newest_snapshot": {
                             "timestamp": newest_snapshot.timestamp,
                             "archive_url": newest_snapshot.archive_url
-                        }
+                        },
+                        "avg_interval_days": sum(intervals) / len(intervals) if intervals else None,
+                        "max_gap_days": max(intervals) if intervals else None,
+                        "years_covered": len(years),
+                        "snapshots_per_year": snapshots_per_year,
+                        "unique_versions": len(unique_digests),
+                        "timemap_count": len(snapshots)  # Используем количество снимков как приближение
                     }
+                    
+                    return result
                 except Exception as e:
                     logger.warning(f"Wayback Machine CDX API check for {domain} failed: {e}")
                     return {"error": str(e)}
@@ -92,17 +148,59 @@ class WaybackService:
                 summary["availability_api_response"] = {"error": cdx_result["error"]}
             else:
                 summary["availability_api_response"] = {"message": "CDX API check successful"}
+                summary["has_snapshot"] = True
                 
                 if "oldest_snapshot" in cdx_result:
                     summary["first_snapshot_date"] = cdx_result["oldest_snapshot"]["timestamp"]
                     summary["oldest_snapshot_url"] = cdx_result["oldest_snapshot"]["archive_url"]
+                    summary["first_snapshot"] = cdx_result["oldest_snapshot"]["timestamp"]
+                    # Преобразуем timestamp в читаемый формат даты
+                    try:
+                        date_obj = datetime.datetime.strptime(cdx_result["oldest_snapshot"]["timestamp"], "%Y%m%d%H%M%S")
+                        summary["first_snapshot"] = date_obj.isoformat()
+                    except ValueError:
+                        pass
                 
                 if "newest_snapshot" in cdx_result:
                     summary["last_snapshot_date"] = cdx_result["newest_snapshot"]["timestamp"]
                     summary["newest_snapshot_url"] = cdx_result["newest_snapshot"]["archive_url"]
+                    summary["last_snapshot"] = cdx_result["newest_snapshot"]["timestamp"]
+                    # Преобразуем timestamp в читаемый формат даты
+                    try:
+                        date_obj = datetime.datetime.strptime(cdx_result["newest_snapshot"]["timestamp"], "%Y%m%d%H%M%S")
+                        summary["last_snapshot"] = date_obj.isoformat()
+                    except ValueError:
+                        pass
                 
                 if "total_snapshots" in cdx_result:
                     summary["total_snapshots"] = cdx_result["total_snapshots"]
+                
+                # Добавляем расширенные метрики
+                if "avg_interval_days" in cdx_result:
+                    summary["avg_interval_days"] = round(cdx_result["avg_interval_days"], 2) if cdx_result["avg_interval_days"] is not None else None
+                
+                if "max_gap_days" in cdx_result:
+                    summary["max_gap_days"] = cdx_result["max_gap_days"]
+                
+                if "years_covered" in cdx_result:
+                    summary["years_covered"] = cdx_result["years_covered"]
+                
+                if "snapshots_per_year" in cdx_result:
+                    summary["snapshots_per_year"] = str(cdx_result["snapshots_per_year"])
+                
+                if "unique_versions" in cdx_result:
+                    summary["unique_versions"] = cdx_result["unique_versions"]
+                
+                if "timemap_count" in cdx_result:
+                    summary["timemap_count"] = cdx_result["timemap_count"]
+                
+                # Вычисляем флаги is_good и recommended
+                total_snapshots = summary["total_snapshots"]
+                max_gap_days = summary["max_gap_days"]
+                avg_interval_days = summary["avg_interval_days"]
+                
+                summary["is_good"] = (total_snapshots >= 1) and (max_gap_days is not None and max_gap_days < 365)
+                summary["recommended"] = (total_snapshots >= 200) and (avg_interval_days is not None and avg_interval_days < 30)
 
         except Exception as e:
             summary["error"] = f"An unexpected error occurred: {str(e)}"

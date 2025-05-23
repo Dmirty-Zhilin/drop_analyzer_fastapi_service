@@ -1,6 +1,12 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
-from fastapi.responses import StreamingResponse
-from typing import List, AsyncGenerator
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Body
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+import pandas as pd
+import io
+import csv
+import tempfile
+import os
+from weasyprint import HTML, CSS
+from typing import List, AsyncGenerator, Dict
 import uuid
 import asyncio
 import json
@@ -38,13 +44,44 @@ async def process_single_domain(domain_name: str, wayback_service: WaybackServic
     else:
         thematic_analysis = {"error": "OpenRouter API key not configured. Skipping thematic analysis."}
 
+    # Извлекаем все необходимые метрики из wayback_history
+    has_snapshot = wayback_history.get("has_snapshot", False)
+    availability_ts = wayback_history.get("availability_ts")
+    total_snapshots = wayback_history.get("total_snapshots", 0)
+    timemap_count = wayback_history.get("timemap_count", 0)
+    first_snapshot = wayback_history.get("first_snapshot")
+    last_snapshot = wayback_history.get("last_snapshot")
+    avg_interval_days = wayback_history.get("avg_interval_days")
+    max_gap_days = wayback_history.get("max_gap_days")
+    years_covered = wayback_history.get("years_covered")
+    snapshots_per_year = wayback_history.get("snapshots_per_year")
+    unique_versions = wayback_history.get("unique_versions")
+    is_good = wayback_history.get("is_good", False)
+    recommended = wayback_history.get("recommended", False)
+    analysis_time_sec = wayback_history.get("analysis_time_sec")
+
     return DomainAnalysisResult(
         domain_name=domain_name,
         wayback_history_summary=wayback_history,
         seo_metrics={"DA": None, "PA": None}, 
         thematic_analysis_result=thematic_analysis,
         assessment_score=None, 
-        assessment_summary="Assessment pending further data integration."
+        assessment_summary="Assessment pending further data integration.",
+        # Добавляем все расширенные метрики
+        has_snapshot=has_snapshot,
+        availability_ts=availability_ts,
+        total_snapshots=total_snapshots,
+        timemap_count=timemap_count,
+        first_snapshot=first_snapshot,
+        last_snapshot=last_snapshot,
+        avg_interval_days=avg_interval_days,
+        max_gap_days=max_gap_days,
+        years_covered=years_covered,
+        snapshots_per_year=snapshots_per_year,
+        unique_versions=unique_versions,
+        is_good=is_good,
+        recommended=recommended,
+        analysis_time_sec=analysis_time_sec
     )
 
 async def run_domain_analysis_background(task_id: str, domains_to_analyze: List[DomainInput]):
@@ -130,14 +167,37 @@ async def get_task_status_http(task_id: str): # Renamed to avoid conflict if SSE
     return AnalysisTaskResponse(**dict(task))
 
 @router.get("/tasks/{task_id}/report", response_model=AnalysisFullReportResponse)
-async def get_task_report(task_id: str):
+async def get_task_report(task_id: str, filter_type: str = None):
     task = fake_tasks_db.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
     if task["status"] != AnalysisTaskStatus.COMPLETED:
         raise HTTPException(status_code=400, detail=f"Task is not yet completed. Current status: {task['status']}")
-    return AnalysisFullReportResponse(**dict(task))
+    
+    # Создаем копию задачи для возможной фильтрации
+    filtered_task = dict(task)
+    
+    # Если указан тип фильтра "long-live", применяем фильтрацию по 4 параметрам
+    if filter_type == "long-live" and "results" in filtered_task:
+        filtered_results = []
+        for result in filtered_task["results"]:
+            # Проверяем условия для long-live доменов
+            total_snapshots = result.get("total_snapshots", 0)
+            years_covered = result.get("years_covered", 0)
+            avg_interval_days = result.get("avg_interval_days", float('inf'))
+            max_gap_days = result.get("max_gap_days", float('inf'))
+            
+            # Применяем 4 параметра фильтрации для long-live доменов
+            if (total_snapshots >= 5 and 
+                years_covered >= 3 and 
+                avg_interval_days is not None and avg_interval_days < 90 and 
+                max_gap_days is not None and max_gap_days < 180):
+                filtered_results.append(result)
+        
+        filtered_task["results"] = filtered_results
+    
+    return AnalysisFullReportResponse(**filtered_task)
 
 async def sse_task_status_generator(task_id: str, request: Request) -> AsyncGenerator[str, None]:
     """Streams status updates for a given task_id."""
@@ -181,5 +241,213 @@ async def stream_task_status(task_id: str, request: Request):
     if task_id not in fake_tasks_db:
         raise HTTPException(status_code=404, detail="Task not found for SSE streaming.")
     return StreamingResponse(sse_task_status_generator(task_id, request), media_type="text/event-stream")
+
+@router.post("/settings/openrouter")
+async def save_openrouter_settings(settings: Dict = Body(...)):
+    """Сохраняет ключ API OpenRouter в файл конфигурации."""
+    api_key = settings.get("api_key")
+    if not api_key or not isinstance(api_key, str) or api_key.strip() == "":
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "API ключ не может быть пустым"}
+        )
+    
+    # Создаем экземпляр сервиса и сохраняем ключ
+    service = OpenRouterService()
+    success = service.set_api_key(api_key)
+    
+    if success:
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "message": "Настройки успешно сохранены"}
+        )
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Не удалось сохранить настройки"}
+        )
+
+@router.get("/settings/openrouter")
+async def get_openrouter_settings():
+    """Получает текущие настройки OpenRouter."""
+    service = OpenRouterService()
+    return JSONResponse(
+        status_code=200,
+        content={"api_key": service.api_key or ""}
+    )
+
+@router.get("/tasks/{task_id}/download")
+async def download_report(task_id: str, format: str = "excel", filter_type: str = None):
+    """Download report in various formats (excel, csv, pdf)"""
+    task = fake_tasks_db.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task["status"] != AnalysisTaskStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail=f"Task is not yet completed. Current status: {task['status']}")
+    
+    # Получаем результаты с учетом фильтрации
+    filtered_task = dict(task)
+    
+    # Если указан тип фильтра "long-live", применяем фильтрацию по 4 параметрам
+    if filter_type == "long-live" and "results" in filtered_task:
+        filtered_results = []
+        for result in filtered_task["results"]:
+            # Проверяем условия для long-live доменов
+            total_snapshots = result.get("total_snapshots", 0)
+            years_covered = result.get("years_covered", 0)
+            avg_interval_days = result.get("avg_interval_days", float('inf'))
+            max_gap_days = result.get("max_gap_days", float('inf'))
+            
+            # Применяем 4 параметра фильтрации для long-live доменов
+            if (total_snapshots >= 5 and 
+                years_covered >= 3 and 
+                avg_interval_days is not None and avg_interval_days < 90 and 
+                max_gap_days is not None and max_gap_days < 180):
+                filtered_results.append(result)
+        
+        filtered_task["results"] = filtered_results
+    
+    # Преобразуем результаты в DataFrame для удобства экспорта
+    data = []
+    for result in filtered_task.get("results", []):
+        data.append({
+            "Домен": result.get("domain_name", ""),
+            "Снимки": result.get("total_snapshots", 0),
+            "Первый снимок": result.get("first_snapshot", ""),
+            "Последний снимок": result.get("last_snapshot", ""),
+            "Лет": result.get("years_covered", 0),
+            "Ср. интервал": result.get("avg_interval_days", 0),
+            "Макс. промежуток": result.get("max_gap_days", 0),
+            "Timemap": result.get("timemap_count", 0),
+            "Рекомендуемый": "Да" if result.get("recommended", False) else "Нет",
+            "Long-live": "Да" if (result.get("total_snapshots", 0) >= 5 and 
+                                result.get("years_covered", 0) >= 3 and 
+                                result.get("avg_interval_days", float('inf')) < 90 and 
+                                result.get("max_gap_days", float('inf')) < 180) else "Нет"
+        })
+    
+    df = pd.DataFrame(data)
+    
+    # Формируем имя файла
+    report_type = "long_live" if filter_type == "long-live" else "full"
+    filename_base = f"drop_report_{report_type}_{task_id[:8]}"
+    
+    if format.lower() == "excel":
+        # Экспорт в Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='Отчет', index=False)
+            # Настройка форматирования
+            workbook = writer.book
+            worksheet = writer.sheets['Отчет']
+            header_format = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1})
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            # Автоподбор ширины столбцов
+            for i, col in enumerate(df.columns):
+                column_width = max(df[col].astype(str).map(len).max(), len(col)) + 2
+                worksheet.set_column(i, i, column_width)
+        
+        output.seek(0)
+        filename = f"{filename_base}.xlsx"
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
+    
+    elif format.lower() == "csv":
+        # Экспорт в CSV
+        output = io.StringIO()
+        df.to_csv(output, index=False, quoting=csv.QUOTE_NONNUMERIC)
+        output.seek(0)
+        filename = f"{filename_base}.csv"
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        return StreamingResponse(io.BytesIO(output.getvalue().encode('utf-8-sig')), media_type="text/csv", headers=headers)
+    
+    elif format.lower() == "pdf":
+        # Экспорт в PDF с использованием WeasyPrint
+        # Создаем временный HTML файл
+        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as temp_html:
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Отчет по доменам</title>
+                <style>
+                    @font-face {{
+                        font-family: 'Noto Sans CJK SC';
+                        src: url('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc');
+                    }}
+                    body {{
+                        font-family: 'Noto Sans CJK SC', 'WenQuanYi Zen Hei', sans-serif;
+                        margin: 20px;
+                    }}
+                    h1 {{
+                        color: #333;
+                        font-size: 24px;
+                        margin-bottom: 20px;
+                    }}
+                    table {{
+                        width: 100%;
+                        border-collapse: collapse;
+                        margin-bottom: 20px;
+                    }}
+                    th, td {{
+                        border: 1px solid #ddd;
+                        padding: 8px;
+                        text-align: left;
+                    }}
+                    th {{
+                        background-color: #f2f2f2;
+                        font-weight: bold;
+                    }}
+                    tr:nth-child(even) {{
+                        background-color: #f9f9f9;
+                    }}
+                </style>
+            </head>
+            <body>
+                <h1>Отчет по доменам {f"(Long-Live)" if filter_type == "long-live" else ""}</h1>
+                <table>
+                    <thead>
+                        <tr>
+                            {"".join([f"<th>{col}</th>" for col in df.columns])}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {"".join(["<tr>" + "".join([f"<td>{cell}</td>" for cell in row]) + "</tr>" for row in df.values.tolist()])}
+                    </tbody>
+                </table>
+                <p>Дата создания: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+            </body>
+            </html>
+            """
+            temp_html.write(html_content.encode('utf-8'))
+            temp_html_path = temp_html.name
+        
+        # Создаем PDF из HTML
+        pdf_path = temp_html_path.replace('.html', '.pdf')
+        HTML(temp_html_path).write_pdf(pdf_path)
+        
+        # Возвращаем PDF файл
+        filename = f"{filename_base}.pdf"
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        
+        # Создаем ответ и удаляем временные файлы после отправки
+        response = FileResponse(pdf_path, media_type="application/pdf", headers=headers)
+        
+        # Удаляем временные файлы после отправки
+        @response.background
+        def cleanup_temp_files():
+            try:
+                os.unlink(temp_html_path)
+                os.unlink(pdf_path)
+            except Exception as e:
+                print(f"Error cleaning up temporary files: {e}")
+        
+        return response
+    
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported format: {format}. Supported formats: excel, csv, pdf")
 
 
