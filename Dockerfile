@@ -1,74 +1,82 @@
 # --------------------------------------------------------------------------------
-# Используем официальный образ Python 3.11 slim на базе Debian Bullseye
+# 1) Берём официальный образ Python 3.11 slim (Debian Bullseye)
 # --------------------------------------------------------------------------------
 FROM python:3.11-slim-bullseye
 
 # --------------------------------------------------------------------------------
-# Отключаем .pyc и буферизацию stdout/stderr
+# 2) Отключаем запись .pyc и вывода stdout/stderr в буфер
 # --------------------------------------------------------------------------------
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # --------------------------------------------------------------------------------
-# Устанавливаем рабочую директорию внутри контейнера
+# 3) Устанавливаем рабочую директорию
 # --------------------------------------------------------------------------------
 WORKDIR /app
 
 # --------------------------------------------------------------------------------
-# Устанавливаем «нативные» (system) зависимости для WeasyPrint и других C-зависимых пакетов
+# 4) Устанавливаем «нативные» зависимости, нужные для WeasyPrint (и прочих C-зависимых пакетов):
+#    – libgobject-2.0-0 / libglib2.0-0  (GObject/GLib)
+#    – libcairo2 / libcairo2-dev         (Cairo 2D)
+#    – libpango-1.0-0 / libpangoft2-1.0-0 / libpangocairo-1.0-0 (Pango)
+#    – libharfbuzz0b / libharfbuzz-subset0 (HarfBuzz)
+#    – libgdk-pixbuf2.0-0 / libgdk-pixbuf2.0-dev (GDK-Pixbuf для PNG/JPEG)
+#    – libjpeg62-turbo-dev / libopenjp2-7-dev     (JPEG/OpenJPEG-заголовки)
+#    – libfontconfig1                            (Fontconfig для шрифтов)
+#    – libffi-dev / python3-dev / build-essential (для сборки CFFI, cryptography и т. д.)
+#    (Если нужен psycopg2 → libpq-dev, раскомментируйте соответствующую строку ниже)
 # --------------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # 1) GObject/GLib (для libgobject-2.0.so.0):
+    # GObject/GLib (libgobject-2.0.so.0 и зависимости)
     libgobject-2.0-0 \
     libglib2.0-0 \
-    # 2) Cairo (2D-графика) и его dev-заголовки (нужны, чтобы некоторые компоненты WeasyPrint собирались):
+    # Cairo 2D и заголовки
     libcairo2 \
     libcairo2-dev \
-    # 3) Pango и его FreeType-подсистема (рендеринг шрифтов):
+    # Pango (рендеринг шрифтов)
     libpango-1.0-0 \
     libpangoft2-1.0-0 \
     libpangocairo-1.0-0 \
-    # 4) HarfBuzz (шрифт-шейпинг), нужен Pango:
+    # HarfBuzz (шейпинг шрифтов)
     libharfbuzz0b \
     libharfbuzz-subset0 \
-    # 5) GDK-Pixbuf (поддержка растровых изображений, JPEG/PNG):
+    # GDK-Pixbuf (PNG/JPEG)
     libgdk-pixbuf2.0-0 \
     libgdk-pixbuf2.0-dev \
-    # 6) JPEG/OpenJPEG (если в requirements есть Pillow или аналогичные):
+    # JPEG / OpenJPEG
     libjpeg62-turbo-dev \
     libopenjp2-7-dev \
-    # 7) Fontconfig (поиск/менеджмент системных шрифтов):
+    # Fontconfig (поиск шрифтов)
     libfontconfig1 \
-    # 8) libffi-dev & python3-dev & build-essential (сборка CFFI, cryptography, других C-расширений):
+    # libffi-dev, python3-dev, build-essential (CFFI / сборка модулей)
     libffi-dev \
     python3-dev \
     build-essential \
-    # 9) Если вам нужен PostgreSQL (psycopg2) — раскомментируйте:
-    # libpq-dev \
+    # libpq-dev  # <- раскомментируйте, если используете psycopg2
  && rm -rf /var/lib/apt/lists/*
 
 # --------------------------------------------------------------------------------
-# Сначала копируем только requirements.txt, чтобы закэшировать установку зависимостей
+# 5) Копируем только requirements.txt (чтобы слой pip install кэшировался)
 # --------------------------------------------------------------------------------
 COPY requirements.txt /app/requirements.txt
 
 # --------------------------------------------------------------------------------
-# Обновляем pip и ставим все Python-зависимости из requirements.txt
+# 6) Устанавливаем Python-зависимости
 # --------------------------------------------------------------------------------
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r /app/requirements.txt
 
 # --------------------------------------------------------------------------------
-# Копируем весь код вашего FastAPI-приложения
+# 7) Копируем весь код приложения
 # --------------------------------------------------------------------------------
 COPY ./app /app/app
 
 # --------------------------------------------------------------------------------
-# Открываем порт 8000 (тот, который вы используете для Uvicorn)
+# 8) Открываем порт 8000 (тот же, который мы указываем в CMD ниже)
 # --------------------------------------------------------------------------------
 EXPOSE 8000
 
 # --------------------------------------------------------------------------------
-# Запускаем FastAPI через Uvicorn
+# 9) Запускаем FastAPI через Uvicorn
 # --------------------------------------------------------------------------------
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
