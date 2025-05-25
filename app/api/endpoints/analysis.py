@@ -30,6 +30,9 @@ fake_tasks_db: dict = {}
 
 router = APIRouter()
 
+# Константа для ограничения количества одновременных задач
+MAX_CONCURRENT_DOMAINS = 10
+
 async def process_single_domain(domain_name: str, wayback_service: WaybackService, openrouter_service: OpenRouterService) -> DomainAnalysisResult:
     """Processes a single domain: fetches Wayback history and performs thematic analysis."""
     wayback_history = await wayback_service.get_domain_history_summary(domain_name)
@@ -84,6 +87,40 @@ async def process_single_domain(domain_name: str, wayback_service: WaybackServic
         analysis_time_sec=analysis_time_sec
     )
 
+async def process_domains_batch(domains_batch: List[DomainInput], wayback_service: WaybackService, openrouter_service: OpenRouterService, task_id: str, batch_index: int, total_batches: int, total_domains: int):
+    """Обрабатывает пакет доменов параллельно"""
+    results = []
+    start_index = batch_index * len(domains_batch)
+    
+    # Обновляем статус задачи перед обработкой пакета
+    if task_id in fake_tasks_db:
+        fake_tasks_db[task_id]["message"] = f"Обработка пакета {batch_index + 1}/{total_batches} ({start_index + 1}-{min(start_index + len(domains_batch), total_domains)}/{total_domains} доменов)"
+        fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
+    
+    # Создаем список задач для параллельного выполнения
+    tasks = []
+    for domain_input in domains_batch:
+        domain_name = domain_input.domain_name
+        tasks.append(process_single_domain(domain_name, wayback_service, openrouter_service))
+    
+    # Выполняем все задачи параллельно
+    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Обрабатываем результаты, преобразуя исключения в сообщения об ошибках
+    for i, result in enumerate(batch_results):
+        domain_name = domains_batch[i].domain_name
+        if isinstance(result, Exception):
+            print(f"Error processing domain {domain_name}: {result}")
+            results.append(DomainAnalysisResult(
+                domain_name=domain_name,
+                wayback_history_summary={"error": f"Failed to process: {str(result)}"},
+                thematic_analysis_result={"error": f"Failed to process: {str(result)}"}
+            ))
+        else:
+            results.append(result)
+    
+    return results
+
 async def run_domain_analysis_background(task_id: str, domains_to_analyze: List[DomainInput]):
     """Actual background task processing using WaybackService and OpenRouterService."""
     print(f"Starting background analysis for task_id: {task_id} on domains: {[d.domain_name for d in domains_to_analyze]}")
@@ -97,31 +134,27 @@ async def run_domain_analysis_background(task_id: str, domains_to_analyze: List[
     wayback_service = WaybackService()
     openrouter_service = OpenRouterService()
 
-    results = []
-    for i, domain_input in enumerate(domains_to_analyze):
-        domain_name = domain_input.domain_name
-        print(f"Processing domain: {domain_name} for task {task_id} ({i+1}/{len(domains_to_analyze)})")
-        # Update status for SSE before processing each domain
-        if task_id in fake_tasks_db:
-            fake_tasks_db[task_id]["message"] = f"Processing domain {i+1}/{len(domains_to_analyze)}: {domain_name}"
-            fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
-            # Small delay to allow SSE to potentially pick up the message change
-            await asyncio.sleep(0.1)
-
-        try:
-            result = await process_single_domain(domain_name, wayback_service, openrouter_service)
-            results.append(result)
-        except Exception as e:
-            print(f"Error processing domain {domain_name} for task {task_id}: {e}")
-            results.append(DomainAnalysisResult(
-                domain_name=domain_name,
-                wayback_history_summary={"error": f"Failed to process: {str(e)}"},
-                thematic_analysis_result={"error": f"Failed to process: {str(e)}"}
-            ))
+    # Разбиваем домены на пакеты для параллельной обработки
+    total_domains = len(domains_to_analyze)
+    batch_size = MAX_CONCURRENT_DOMAINS  # Максимальное количество одновременно обрабатываемых доменов
+    batches = [domains_to_analyze[i:i + batch_size] for i in range(0, total_domains, batch_size)]
+    total_batches = len(batches)
+    
+    all_results = []
+    for i, batch in enumerate(batches):
+        # Обрабатываем каждый пакет доменов параллельно
+        batch_results = await process_domains_batch(
+            batch, wayback_service, openrouter_service, 
+            task_id, i, total_batches, total_domains
+        )
+        all_results.extend(batch_results)
+        
+        # Небольшая пауза между пакетами для обновления статуса
+        await asyncio.sleep(0.1)
     
     if task_id in fake_tasks_db:
         fake_tasks_db[task_id]["status"] = AnalysisTaskStatus.COMPLETED
-        fake_tasks_db[task_id]["results"] = [r.model_dump() for r in results]
+        fake_tasks_db[task_id]["results"] = [r.model_dump() for r in all_results]
         fake_tasks_db[task_id]["message"] = "Task completed successfully."
         fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
     print(f"Finished background analysis for task_id: {task_id}")
@@ -361,93 +394,48 @@ async def download_report(task_id: str, format: str = "excel", filter_type: str 
         output.seek(0)
         filename = f"{filename_base}.csv"
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-        return StreamingResponse(io.BytesIO(output.getvalue().encode('utf-8-sig')), media_type="text/csv", headers=headers)
+        return StreamingResponse(io.BytesIO(output.getvalue().encode('utf-8')), media_type="text/csv", headers=headers)
     
     elif format.lower() == "pdf":
-        # Экспорт в PDF с использованием WeasyPrint
+        # Экспорт в PDF
         # Создаем временный HTML файл
-        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as temp_html:
+        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as f:
             html_content = f"""
             <!DOCTYPE html>
             <html>
             <head>
                 <meta charset="UTF-8">
-                <title>Отчет по доменам</title>
+                <title>Domain Analysis Report</title>
                 <style>
-                    @font-face {{
-                        font-family: 'Noto Sans CJK SC';
-                        src: url('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc');
-                    }}
-                    body {{
-                        font-family: 'Noto Sans CJK SC', 'WenQuanYi Zen Hei', sans-serif;
-                        margin: 20px;
-                    }}
-                    h1 {{
-                        color: #333;
-                        font-size: 24px;
-                        margin-bottom: 20px;
-                    }}
-                    table {{
-                        width: 100%;
-                        border-collapse: collapse;
-                        margin-bottom: 20px;
-                    }}
-                    th, td {{
-                        border: 1px solid #ddd;
-                        padding: 8px;
-                        text-align: left;
-                    }}
-                    th {{
-                        background-color: #f2f2f2;
-                        font-weight: bold;
-                    }}
-                    tr:nth-child(even) {{
-                        background-color: #f9f9f9;
-                    }}
+                    body {{ font-family: Arial, sans-serif; }}
+                    table {{ border-collapse: collapse; width: 100%; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                    th {{ background-color: #f2f2f2; }}
+                    tr:nth-child(even) {{ background-color: #f9f9f9; }}
                 </style>
             </head>
             <body>
-                <h1>Отчет по доменам {f"(Long-Live)" if filter_type == "long-live" else ""}</h1>
-                <table>
-                    <thead>
-                        <tr>
-                            {"".join([f"<th>{col}</th>" for col in df.columns])}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {"".join(["<tr>" + "".join([f"<td>{cell}</td>" for cell in row]) + "</tr>" for row in df.values.tolist()])}
-                    </tbody>
-                </table>
-                <p>Дата создания: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+                <h1>Domain Analysis Report</h1>
+                <p>Task ID: {task_id}</p>
+                <p>Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+                {df.to_html(index=False)}
             </body>
             </html>
             """
-            temp_html.write(html_content.encode('utf-8'))
-            temp_html_path = temp_html.name
+            f.write(html_content.encode('utf-8'))
+            html_path = f.name
         
         # Создаем PDF из HTML
-        pdf_path = temp_html_path.replace('.html', '.pdf')
-        HTML(temp_html_path).write_pdf(pdf_path)
+        pdf_path = html_path.replace('.html', '.pdf')
+        HTML(html_path).write_pdf(pdf_path)
+        
+        # Удаляем временный HTML файл
+        os.unlink(html_path)
         
         # Возвращаем PDF файл
         filename = f"{filename_base}.pdf"
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-        
-        # Создаем ответ и удаляем временные файлы после отправки
-        response = FileResponse(pdf_path, media_type="application/pdf", headers=headers)
-        
-        # Удаляем временные файлы после отправки
-        @response.background
-        def cleanup_temp_files():
-            try:
-                os.unlink(temp_html_path)
-                os.unlink(pdf_path)
-            except Exception as e:
-                print(f"Error cleaning up temporary files: {e}")
-        
-        return response
+        return FileResponse(pdf_path, media_type="application/pdf", headers=headers, filename=filename)
     
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported format: {format}. Supported formats: excel, csv, pdf")
-
-
