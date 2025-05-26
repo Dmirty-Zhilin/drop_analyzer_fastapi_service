@@ -1,5 +1,5 @@
 """
-Улучшенная версия main.py с расширенными CORS настройками и глобальным обработчиком ошибок
+Улучшенная версия main.py с исправленными CORS настройками для решения проблемы NetworkError
 """
 import os
 from fastapi import FastAPI, Request
@@ -13,19 +13,23 @@ app = FastAPI(title="Drop Domain Analyzer API", version="0.1.0")
 # Получаем список разрешенных доменов из переменной окружения или используем значения по умолчанию
 default_origins = [
     "https://qo8k8k0c48sk080ccwgswocg.alettidesign.ru",  # Основной домен фронтенда
-    "http://45.155.207.218:3090",  # Адрес фронтенда по IP и порту
-    "http://localhost:3090",  # Локальный адрес для разработки
-    "*"  # Разрешаем все источники для тестирования (в продакшене следует убрать)
+    "http://qo8k8k0c48sk080ccwgswocg.alettidesign.ru",   # HTTP версия домена фронтенда
+    "http://45.155.207.218:3090",                        # Адрес фронтенда по IP и порту
+    "https://45.155.207.218:3090",                       # HTTPS версия IP адреса
+    "http://localhost:3090",                             # Локальный адрес для разработки
 ]
+
 origins = os.getenv("ALLOWED_ORIGINS", ",".join(default_origins)).split(",")
 
-# Добавляем CORS middleware с динамическими настройками
+# Добавляем CORS middleware с улучшенными настройками
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Разрешаем все HTTP методы
-    allow_headers=["*"],  # Разрешаем все заголовки
+    allow_methods=["*"],                                 # Разрешаем все HTTP методы
+    allow_headers=["*"],                                 # Разрешаем все заголовки
+    expose_headers=["Content-Disposition", "Location"],  # Разрешаем доступ к заголовкам редиректа
+    max_age=86400,                                       # Кэширование предзапросов на 24 часа
 )
 
 # Глобальный обработчик исключений
@@ -49,7 +53,7 @@ async def read_root():
     """
     return {"message": "Welcome to Drop Domain Analyzer API"}
 
-# Включаем роутеры
+# Включаем роутеры с правильными путями (без trailing slash)
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["Analysis Tasks"])
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
 
