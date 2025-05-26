@@ -136,47 +136,36 @@ async def get_majestic_data(domain: str):
 async def process_analysis_task(task_id: str, domains: List[str]):
     """
     Асинхронная функция для обработки задачи анализа доменов.
-    В реальном приложении здесь должна быть логика анализа доменов.
+    Использует реальный анализ через Wayback Machine API.
     """
+    # Импортируем модуль анализа
+    from app.utils.wayback_analyzer import analyze_domains
+    
     # Обновляем статус задачи
     if task_id in fake_tasks_db:
         fake_tasks_db[task_id]["status"] = "processing"
     
-    # Имитация длительной обработки
-    await asyncio.sleep(2)
-    
-    # Генерация уникальных результатов анализа для каждого домена
-    results = []
-    for domain in domains:
-        # Используем хеш домена для генерации уникальных значений
-        domain_hash = hash(domain)
+    try:
+        # Выполняем реальный анализ доменов через Wayback Machine API
+        results = await analyze_domains(domains, concurrency=5)
         
-        # Генерируем уникальные данные на основе хеша домена
-        total_snapshots = 50 + abs(domain_hash % 200)
-        first_year = 2005 + abs(domain_hash % 10)
-        last_year = 2020 + abs((domain_hash // 10) % 5)
-        years_covered = last_year - first_year
-        avg_interval = round(20 + abs(domain_hash % 60), 1)
-        max_gap = 60 + abs(domain_hash % 100)
-        timemap_count = 3 + abs(domain_hash % 10)
-        score = round(5.0 + (abs(domain_hash % 50) / 10), 1)
-        
-        # Формируем результат с уникальными значениями
-        result = {
-            "domain_name": domain,
-            "has_snapshot": True,
-            "total_snapshots": total_snapshots,
-            "first_snapshot": f"{first_year}-01-01",
-            "last_snapshot": f"{last_year}-01-01",
-            "years_covered": years_covered,
-            "avg_interval_days": avg_interval,
-            "max_gap_days": max_gap,
-            "timemap_count": timemap_count,
-            "recommended": score > 7.0,
-            "assessment_score": score,
-            "assessment_summary": f"Домен {domain} имеет {'хорошую' if score > 7.0 else 'среднюю'} историю в архиве."
-        }
-        results.append(result)
+        # Проверяем результаты
+        if not results:
+            logger.warning(f"No results returned from domain analysis for task {task_id}")
+            # Обновляем задачу с ошибкой
+            if task_id in fake_tasks_db:
+                fake_tasks_db[task_id]["status"] = "failed"
+                fake_tasks_db[task_id]["error"] = "No results returned from domain analysis"
+            return
+            
+        logger.info(f"Successfully analyzed {len(results)} domains for task {task_id}")
+    except Exception as e:
+        logger.error(f"Error during domain analysis for task {task_id}: {e}")
+        # Обновляем задачу с ошибкой
+        if task_id in fake_tasks_db:
+            fake_tasks_db[task_id]["status"] = "failed"
+            fake_tasks_db[task_id]["error"] = str(e)
+        return
     
     # Обновляем задачу с результатами
     if task_id in fake_tasks_db:
