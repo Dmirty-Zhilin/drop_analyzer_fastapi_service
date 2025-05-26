@@ -110,6 +110,29 @@ async def export_analysis_report(
     """
     return await export_report(report_id, format, filter_type, background_tasks)
 
+@router.get("/majestic/{domain}")
+async def get_majestic_data(domain: str):
+    """
+    Получить данные Majestic для указанного домена.
+    В реальном приложении здесь должен быть запрос к API Majestic.
+    """
+    # Имитация запроса к API Majestic
+    # В реальном приложении здесь должен быть настоящий запрос к API
+    await asyncio.sleep(1)  # Имитация задержки сети
+    
+    # Возвращаем тестовые данные
+    return {
+        "domain": domain,
+        "majestic_data": {
+            "domain_authority": round(0.1 + 0.8 * hash(domain) % 100 / 100, 1),  # Случайное значение от 0.1 до 0.9
+            "page_authority": round(0.1 + 0.8 * (hash(domain) + 1) % 100 / 100, 1),  # Случайное значение от 0.1 до 0.9
+            "trust_flow": int(10 + 80 * hash(domain) % 100 / 100),  # Случайное значение от 10 до 90
+            "citation_flow": int(10 + 80 * (hash(domain) + 2) % 100 / 100),  # Случайное значение от 10 до 90
+            "backlinks": int(100 + 9900 * hash(domain) % 100 / 100),  # Случайное значение от 100 до 10000
+            "referring_domains": int(10 + 990 * hash(domain) % 100 / 100),  # Случайное значение от 10 до 1000
+        }
+    }
+
 async def process_analysis_task(task_id: str, domains: List[str]):
     """
     Асинхронная функция для обработки задачи анализа доменов.
@@ -127,7 +150,7 @@ async def process_analysis_task(task_id: str, domains: List[str]):
     for domain in domains:
         # В реальном приложении здесь должен быть настоящий анализ
         result = {
-            "domain": domain,
+            "domain_name": domain,  # Изменено с "domain" на "domain_name" для соответствия с frontend
             "has_snapshot": True,
             "total_snapshots": 100,
             "first_snapshot": "2010-01-01",
