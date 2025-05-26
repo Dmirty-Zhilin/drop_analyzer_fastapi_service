@@ -213,22 +213,23 @@ async def analyze_domains(domains: list, concurrency: int = DEFAULT_CONCURRENCY)
     semaphore = asyncio.Semaphore(concurrency)
     conn = aiohttp.TCPConnector(limit_per_host=concurrency)
     
-    async def analyze_with_semaphore(domain):
+    async def analyze_with_semaphore(domain, session):
         async with semaphore:
-            async with aiohttp.ClientSession(connector=conn) as session:
-                return await analyze_domain(domain, session)
+            return await analyze_domain(domain, session)
     
-    tasks = [asyncio.create_task(analyze_with_semaphore(domain)) for domain in domains]
-    results = []
-    
-    for fut in asyncio.as_completed(tasks):
-        try:
-            result = await fut
-            if result:
-                results.append(result)
-            else:
-                logger.error("Task for a domain completed but returned None.")
-        except Exception as e:
-            logger.error(f"Error processing a domain task: {e}")
+    # Создаем одну общую сессию для всех доменов
+    async with aiohttp.ClientSession(connector=conn) as session:
+        tasks = [asyncio.create_task(analyze_with_semaphore(domain, session)) for domain in domains]
+        results = []
+        
+        for fut in asyncio.as_completed(tasks):
+            try:
+                result = await fut
+                if result:
+                    results.append(result)
+                else:
+                    logger.error("Task for a domain completed but returned None.")
+            except Exception as e:
+                logger.error(f"Error processing a domain task: {e}")
     
     return results

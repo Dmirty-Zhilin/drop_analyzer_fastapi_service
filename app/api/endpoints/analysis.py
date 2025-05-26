@@ -7,6 +7,10 @@ from pydantic import BaseModel
 from datetime import datetime
 import uuid
 import asyncio
+import logging
+
+# Настройка логгера
+logger = logging.getLogger(__name__)
 
 from app.utils.export_utils import export_report
 from app.utils.pagination import paginate, run_in_background, PaginatedResponse
