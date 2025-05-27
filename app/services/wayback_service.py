@@ -1,9 +1,7 @@
 import asyncio
 import logging
 from typing import Dict, Any, Optional, List, Tuple
-import datetime
 from datetime import datetime
-import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +140,11 @@ class WaybackService:
                     # это должен быть отдельный запрос к timemap API
                     timemap_count = len(snapshots)
                     
+                    # Безопасный расчет среднего значения
+                    avg_interval = 0
+                    if gaps:
+                        avg_interval = round(sum(gaps) / len(gaps), 2)
+                    
                     return {
                         "total_snapshots": len(snapshots),
                         "oldest_snapshot": {
@@ -153,7 +156,7 @@ class WaybackService:
                             "archive_url": newest_snapshot.archive_url
                         },
                         "years_covered": len(years),
-                        "avg_interval_days": round(statistics.mean(gaps), 2) if gaps else 0,
+                        "avg_interval_days": avg_interval,
                         "max_gap_days": max(gaps) if gaps else 0,
                         "timemap_count": timemap_count
                     }
