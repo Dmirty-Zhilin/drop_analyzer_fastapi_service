@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
-from typing import List, AsyncGenerator
+from typing import List, AsyncGenerator, Dict, Any
 import uuid
 import asyncio
 import json
@@ -59,15 +59,28 @@ async def run_domain_analysis_background(task_id: str, domains_to_analyze: List[
 
     wayback_service = WaybackService()
     openrouter_service = OpenRouterService()
+    
+    # Инициализируем прогресс-трекер
+    wayback_service.reset_progress(len(domains_to_analyze))
 
     results = []
     for i, domain_input in enumerate(domains_to_analyze):
         domain_name = domain_input.domain_name
         print(f"Processing domain: {domain_name} for task {task_id} ({i+1}/{len(domains_to_analyze)})")
+        
+        # Обновляем прогресс перед обработкой домена
+        wayback_service.update_progress(domain_name)
+        
         # Update status for SSE before processing each domain
         if task_id in fake_tasks_db:
+            # Получаем текущий прогресс
+            progress = wayback_service.get_progress()
+            
+            # Обновляем сообщение с информацией о прогрессе
             fake_tasks_db[task_id]["message"] = f"Processing domain {i+1}/{len(domains_to_analyze)}: {domain_name}"
             fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
+            fake_tasks_db[task_id]["progress"] = progress
+            
             # Small delay to allow SSE to potentially pick up the message change
             await asyncio.sleep(0.1)
 
@@ -87,6 +100,11 @@ async def run_domain_analysis_background(task_id: str, domains_to_analyze: List[
         fake_tasks_db[task_id]["results"] = [r.model_dump() for r in results]
         fake_tasks_db[task_id]["message"] = "Task completed successfully."
         fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
+        
+        # Обновляем прогресс по завершении
+        wayback_service.progress["status"] = "completed"
+        fake_tasks_db[task_id]["progress"] = wayback_service.get_progress()
+        
     print(f"Finished background analysis for task_id: {task_id}")
 
 @router.post("/tasks/", response_model=AnalysisTaskResponse, status_code=202)
@@ -104,16 +122,19 @@ async def create_analysis_task(
         "created_at": current_time,
         "updated_at": current_time,
         "domains_submitted": [d.domain_name for d in task_data.domains],
-        "results": [] 
+        "results": [],
+        "progress": {
+            "total_domains": len(task_data.domains),
+            "current_domain_index": 0,
+            "current_domain": "",
+            "status": "pending",
+            "domains_processed": []
+        }
     }
     fake_tasks_db[task_id] = task_info
 
     background_tasks.add_task(run_domain_analysis_background, task_id, task_data.domains)
     
-    # Status will be updated by the background task itself to PROCESSING
-    # fake_tasks_db[task_id]["status"] = AnalysisTaskStatus.PROCESSING 
-    # fake_tasks_db[task_id]["message"] = "Task is now being processed."
-
     return AnalysisTaskResponse(
         task_id=task_id,
         status=fake_tasks_db[task_id]["status"],
@@ -128,6 +149,25 @@ async def get_task_status_http(task_id: str): # Renamed to avoid conflict if SSE
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return AnalysisTaskResponse(**dict(task))
+
+@router.get("/tasks/{task_id}/progress")
+async def get_task_progress(task_id: str):
+    """Endpoint to get detailed progress information for a task."""
+    task = fake_tasks_db.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Возвращаем информацию о прогрессе
+    return {
+        "task_id": task_id,
+        "progress": task.get("progress", {
+            "total_domains": 0,
+            "current_domain_index": 0,
+            "current_domain": "",
+            "status": "unknown",
+            "domains_processed": []
+        })
+    }
 
 @router.get("/tasks/{task_id}/report", response_model=AnalysisFullReportResponse)
 async def get_task_report(task_id: str):
@@ -157,11 +197,15 @@ async def sse_task_status_generator(task_id: str, request: Request) -> AsyncGene
             yield f"event: error\ndata: {json.dumps({'error': 'Task disappeared'})}\n\n"
             break
         
+        # Добавляем информацию о прогрессе в статус
+        progress_info = task_info.get("progress", {})
+        
         current_status_json = json.dumps({
             "task_id": task_info["task_id"],
             "status": task_info["status"],
             "message": task_info.get("message", ""),
-            "updated_at": task_info.get("updated_at", datetime.utcnow().isoformat())
+            "updated_at": task_info.get("updated_at", datetime.utcnow().isoformat()),
+            "progress": progress_info
         })
 
         if current_status_json != last_sent_status_json:
@@ -181,5 +225,3 @@ async def stream_task_status(task_id: str, request: Request):
     if task_id not in fake_tasks_db:
         raise HTTPException(status_code=404, detail="Task not found for SSE streaming.")
     return StreamingResponse(sse_task_status_generator(task_id, request), media_type="text/event-stream")
-
-
