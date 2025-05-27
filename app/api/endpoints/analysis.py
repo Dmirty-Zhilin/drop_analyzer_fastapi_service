@@ -1,185 +1,249 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
-from fastapi.responses import StreamingResponse
-from typing import List, AsyncGenerator
+"""
+Обновленный модуль analysis.py с асинхронной обработкой тяжелых задач и интеграцией улучшенного экспорта
+"""
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends
+from typing import List, Optional
+from pydantic import BaseModel
+from datetime import datetime
 import uuid
 import asyncio
-import json
-from datetime import datetime
-import os
+import logging
 
-from app.models.analysis_models import (
-    AnalysisTaskCreate,
-    AnalysisTaskResponse,
-    AnalysisFullReportResponse,
-    AnalysisTaskStatus,
-    DomainAnalysisResult,
-    DomainInput
-)
-from app.services.wayback_service import WaybackService
-from app.services.openrouter_service import OpenRouterService
+# Настройка логгера
+logger = logging.getLogger(__name__)
 
-# Placeholder for a shared dictionary to store task statuses and results
-# In a real application, this would be a database or a distributed cache like Redis
-fake_tasks_db: dict = {}
+from app.utils.export_utils import export_report
+from app.utils.pagination import paginate, run_in_background, PaginatedResponse
+from app.models.analysis.task_models import TaskCreate, TaskResponse, TaskDetailResponse
 
 router = APIRouter()
 
-async def process_single_domain(domain_name: str, wayback_service: WaybackService, openrouter_service: OpenRouterService) -> DomainAnalysisResult:
-    """Processes a single domain: fetches Wayback history and performs thematic analysis."""
-    wayback_history = await wayback_service.get_domain_history_summary(domain_name)
+# Временное хранилище задач (в реальном приложении должно быть заменено на базу данных)
+fake_tasks_db = {}
+
+@router.get("/", response_model=PaginatedResponse[TaskResponse])
+async def list_tasks(
+    page: int = Query(1, ge=1, description="Номер страницы"),
+    page_size: int = Query(20, ge=1, le=100, description="Количество элементов на странице")
+):
+    """
+    Получить пагинированный список всех задач анализа.
+    """
+    tasks_list = [
+        TaskResponse(
+            id=task_id,
+            task_name=task_data["task_name"],
+            status=task_data["status"],
+            created_at=task_data["created_at"],
+            domains_count=len(task_data["domains"])
+        )
+        for task_id, task_data in fake_tasks_db.items()
+    ]
     
-    thematic_analysis = None
-    simulated_content_for_llm = f"This is placeholder content for {domain_name}. Imagine a full webpage text here."
-    if wayback_history.get("error"):
-        simulated_content_for_llm = f"Could not fetch content for {domain_name} due to Wayback error: {wayback_history.get('error')}"
+    # Применяем пагинацию
+    return await paginate(tasks_list, page, page_size)
 
-    if openrouter_service.api_key:
-        thematic_analysis = await openrouter_service.get_thematic_analysis(simulated_content_for_llm, domain_name)
-    else:
-        thematic_analysis = {"error": "OpenRouter API key not configured. Skipping thematic analysis."}
-
-    return DomainAnalysisResult(
-        domain_name=domain_name,
-        wayback_history_summary=wayback_history,
-        seo_metrics={"DA": None, "PA": None}, 
-        thematic_analysis_result=thematic_analysis,
-        assessment_score=None, 
-        assessment_summary="Assessment pending further data integration."
-    )
-
-async def run_domain_analysis_background(task_id: str, domains_to_analyze: List[DomainInput]):
-    """Actual background task processing using WaybackService and OpenRouterService."""
-    print(f"Starting background analysis for task_id: {task_id} on domains: {[d.domain_name for d in domains_to_analyze]}")
-    
-    # Update task status to processing immediately
-    if task_id in fake_tasks_db:
-        fake_tasks_db[task_id]["status"] = AnalysisTaskStatus.PROCESSING
-        fake_tasks_db[task_id]["message"] = "Task processing has started."
-        fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
-
-    wayback_service = WaybackService()
-    openrouter_service = OpenRouterService()
-
-    results = []
-    for i, domain_input in enumerate(domains_to_analyze):
-        domain_name = domain_input.domain_name
-        print(f"Processing domain: {domain_name} for task {task_id} ({i+1}/{len(domains_to_analyze)})")
-        # Update status for SSE before processing each domain
-        if task_id in fake_tasks_db:
-            fake_tasks_db[task_id]["message"] = f"Processing domain {i+1}/{len(domains_to_analyze)}: {domain_name}"
-            fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
-            # Small delay to allow SSE to potentially pick up the message change
-            await asyncio.sleep(0.1)
-
-        try:
-            result = await process_single_domain(domain_name, wayback_service, openrouter_service)
-            results.append(result)
-        except Exception as e:
-            print(f"Error processing domain {domain_name} for task {task_id}: {e}")
-            results.append(DomainAnalysisResult(
-                domain_name=domain_name,
-                wayback_history_summary={"error": f"Failed to process: {str(e)}"},
-                thematic_analysis_result={"error": f"Failed to process: {str(e)}"}
-            ))
-    
-    if task_id in fake_tasks_db:
-        fake_tasks_db[task_id]["status"] = AnalysisTaskStatus.COMPLETED
-        fake_tasks_db[task_id]["results"] = [r.model_dump() for r in results]
-        fake_tasks_db[task_id]["message"] = "Task completed successfully."
-        fake_tasks_db[task_id]["updated_at"] = datetime.utcnow().isoformat()
-    print(f"Finished background analysis for task_id: {task_id}")
-
-@router.post("/tasks/", response_model=AnalysisTaskResponse, status_code=202)
-async def create_analysis_task(
-    task_data: AnalysisTaskCreate,
+@router.post("/analyze", response_model=TaskResponse)
+async def analyze_domains(
+    task_data: TaskCreate,
     background_tasks: BackgroundTasks
 ):
+    """
+    Создать новую задачу анализа доменов.
+    Анализ будет выполнен асинхронно в фоновом режиме.
+    """
     task_id = str(uuid.uuid4())
-    current_time = datetime.utcnow().isoformat()
+    created_at = datetime.utcnow()
     
-    task_info = {
-        "task_id": task_id,
-        "status": AnalysisTaskStatus.PENDING,
-        "message": "Task received and queued for processing.",
-        "created_at": current_time,
-        "updated_at": current_time,
-        "domains_submitted": [d.domain_name for d in task_data.domains],
-        "results": [] 
+    # Создаем новую задачу
+    task = {
+        "id": task_id,
+        "task_name": task_data.task_name,
+        "domains": task_data.domains,
+        "status": "pending",
+        "created_at": created_at,
+        "completed_at": None,
+        "results": []
     }
-    fake_tasks_db[task_id] = task_info
-
-    background_tasks.add_task(run_domain_analysis_background, task_id, task_data.domains)
     
-    # Status will be updated by the background task itself to PROCESSING
-    # fake_tasks_db[task_id]["status"] = AnalysisTaskStatus.PROCESSING 
-    # fake_tasks_db[task_id]["message"] = "Task is now being processed."
-
-    return AnalysisTaskResponse(
-        task_id=task_id,
-        status=fake_tasks_db[task_id]["status"],
-        message=fake_tasks_db[task_id]["message"],
-        created_at=current_time,
-        updated_at=current_time
+    # Сохраняем задачу в базу данных
+    fake_tasks_db[task_id] = task
+    
+    # Запускаем анализ в фоновом режиме
+    run_in_background(background_tasks, process_analysis_task, task_id, task_data.domains)
+    
+    return TaskResponse(
+        id=task_id,
+        task_name=task_data.task_name,
+        status="pending",
+        created_at=created_at,
+        domains_count=len(task_data.domains)
     )
 
-@router.get("/tasks/{task_id}/status", response_model=AnalysisTaskResponse)
-async def get_task_status_http(task_id: str): # Renamed to avoid conflict if SSE is also named get_task_status
-    task = fake_tasks_db.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return AnalysisTaskResponse(**dict(task))
+# Добавляем алиасы для совместимости с фронтендом
+# ВАЖНО: Алиасы должны быть объявлены ДО параметрического маршрута /{task_id}
 
-@router.get("/tasks/{task_id}/report", response_model=AnalysisFullReportResponse)
-async def get_task_report(task_id: str):
-    task = fake_tasks_db.get(task_id)
-    if not task:
+@router.get("/tasks/{task_id}", response_model=TaskDetailResponse)
+async def get_task_alias(task_id: str):
+    """
+    Алиас для получения детальной информации о задаче анализа по ID.
+    Обеспечивает совместимость с фронтендом, который может использовать этот путь.
+    """
+    if task_id not in fake_tasks_db:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    if task["status"] != AnalysisTaskStatus.COMPLETED:
-        raise HTTPException(status_code=400, detail=f"Task is not yet completed. Current status: {task['status']}")
-    return AnalysisFullReportResponse(**dict(task))
+    task_data = fake_tasks_db[task_id]
+    
+    return TaskDetailResponse(
+        id=task_id,
+        task_name=task_data["task_name"],
+        status=task_data["status"],
+        created_at=task_data["created_at"],
+        completed_at=task_data["completed_at"],
+        domains_count=len(task_data["domains"]),
+        domains=task_data["domains"],
+        results=task_data["results"]
+    )
 
-async def sse_task_status_generator(task_id: str, request: Request) -> AsyncGenerator[str, None]:
-    """Streams status updates for a given task_id."""
-    last_sent_status_json = None
+@router.get("/status/{task_id}", response_model=TaskDetailResponse)
+async def get_task_status_alias(task_id: str):
+    """
+    Алиас для получения статуса задачи анализа по ID.
+    Обеспечивает совместимость с фронтендом, который может использовать этот путь.
+    """
     if task_id not in fake_tasks_db:
-        yield f"event: error\ndata: {json.dumps({'error': 'Task not found'})}\n\n"
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_data = fake_tasks_db[task_id]
+    
+    return TaskDetailResponse(
+        id=task_id,
+        task_name=task_data["task_name"],
+        status=task_data["status"],
+        created_at=task_data["created_at"],
+        completed_at=task_data["completed_at"],
+        domains_count=len(task_data["domains"]),
+        domains=task_data["domains"],
+        results=task_data["results"]
+    )
+
+# Основной маршрут для получения задачи по ID
+@router.get("/{task_id}", response_model=TaskDetailResponse)
+async def get_task(task_id: str):
+    """
+    Получить детальную информацию о задаче анализа по ID.
+    """
+    if task_id not in fake_tasks_db:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_data = fake_tasks_db[task_id]
+    
+    return TaskDetailResponse(
+        id=task_id,
+        task_name=task_data["task_name"],
+        status=task_data["status"],
+        created_at=task_data["created_at"],
+        completed_at=task_data["completed_at"],
+        domains_count=len(task_data["domains"]),
+        domains=task_data["domains"],
+        results=task_data["results"]
+    )
+
+# Алиас, который должен быть после основного маршрута /{task_id}
+@router.get("/{task_id}/status", response_model=TaskDetailResponse)
+async def get_task_status_alias2(task_id: str):
+    """
+    Еще один алиас для получения статуса задачи анализа по ID.
+    Обеспечивает совместимость с фронтендом, который может использовать этот путь.
+    """
+    if task_id not in fake_tasks_db:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_data = fake_tasks_db[task_id]
+    
+    return TaskDetailResponse(
+        id=task_id,
+        task_name=task_data["task_name"],
+        status=task_data["status"],
+        created_at=task_data["created_at"],
+        completed_at=task_data["completed_at"],
+        domains_count=len(task_data["domains"]),
+        domains=task_data["domains"],
+        results=task_data["results"]
+    )
+
+@router.get("/export/{report_id}")
+async def export_analysis_report(
+    report_id: str,
+    format: str = Query("excel", description="Формат экспорта (excel, csv, pdf)"),
+    filter_type: Optional[str] = Query(None, description="Тип фильтра (long-live)"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Экспортировать отчет в выбранном формате.
+    Использует улучшенную функцию экспорта с обработкой ошибок и временных файлов.
+    """
+    return await export_report(report_id, format, filter_type, background_tasks)
+
+@router.get("/majestic/{domain}")
+async def get_majestic_data(domain: str):
+    """
+    Получить данные Majestic для указанного домена.
+    В реальном приложении здесь должен быть запрос к API Majestic.
+    """
+    # Имитация запроса к API Majestic
+    # В реальном приложении здесь должен быть настоящий запрос к API
+    await asyncio.sleep(1)  # Имитация задержки сети
+    
+    # Возвращаем тестовые данные
+    return {
+        "domain": domain,
+        "majestic_data": {
+            "domain_authority": round(0.1 + 0.8 * hash(domain) % 100 / 100, 1),  # Случайное значение от 0.1 до 0.9
+            "page_authority": round(0.1 + 0.8 * (hash(domain) + 1) % 100 / 100, 1),  # Случайное значение от 0.1 до 0.9
+            "trust_flow": int(10 + 80 * hash(domain) % 100 / 100),  # Случайное значение от 10 до 90
+            "citation_flow": int(10 + 80 * (hash(domain) + 2) % 100 / 100),  # Случайное значение от 10 до 90
+            "backlinks": int(100 + 9900 * hash(domain) % 100 / 100),  # Случайное значение от 100 до 10000
+            "referring_domains": int(10 + 990 * hash(domain) % 100 / 100),  # Случайное значение от 10 до 1000
+        }
+    }
+
+async def process_analysis_task(task_id: str, domains: List[str]):
+    """
+    Асинхронная функция для обработки задачи анализа доменов.
+    Использует реальный анализ через Wayback Machine API.
+    """
+    # Импортируем модуль анализа
+    from app.utils.wayback_analyzer import analyze_domains
+    
+    # Обновляем статус задачи
+    if task_id in fake_tasks_db:
+        fake_tasks_db[task_id]["status"] = "processing"
+    
+    try:
+        # Выполняем реальный анализ доменов через Wayback Machine API
+        results = await analyze_domains(domains, concurrency=5)
+        
+        # Проверяем результаты
+        if not results:
+            logger.warning(f"No results returned from domain analysis for task {task_id}")
+            # Обновляем задачу с ошибкой
+            if task_id in fake_tasks_db:
+                fake_tasks_db[task_id]["status"] = "failed"
+                fake_tasks_db[task_id]["error"] = "No results returned from domain analysis"
+            return
+            
+        logger.info(f"Successfully analyzed {len(results)} domains for task {task_id}")
+    except Exception as e:
+        logger.error(f"Error during domain analysis for task {task_id}: {e}")
+        # Обновляем задачу с ошибкой
+        if task_id in fake_tasks_db:
+            fake_tasks_db[task_id]["status"] = "failed"
+            fake_tasks_db[task_id]["error"] = str(e)
         return
-
-    while True:
-        # Check if client disconnected
-        if await request.is_disconnected():
-            print(f"Client for task {task_id} disconnected from SSE stream.")
-            break
-
-        task_info = fake_tasks_db.get(task_id)
-        if not task_info: # Should have been caught above, but as a safeguard
-            yield f"event: error\ndata: {json.dumps({'error': 'Task disappeared'})}\n\n"
-            break
-        
-        current_status_json = json.dumps({
-            "task_id": task_info["task_id"],
-            "status": task_info["status"],
-            "message": task_info.get("message", ""),
-            "updated_at": task_info.get("updated_at", datetime.utcnow().isoformat())
-        })
-
-        if current_status_json != last_sent_status_json:
-            yield f"data: {current_status_json}\n\n"
-            last_sent_status_json = current_status_json
-        
-        if task_info["status"] == AnalysisTaskStatus.COMPLETED or task_info["status"] == AnalysisTaskStatus.FAILED:
-            # Send one last update and then close
-            yield f"event: complete\ndata: {current_status_json}\n\n" # Custom event for completion/failure
-            break
-        
-        await asyncio.sleep(1) # Poll interval
-
-@router.get("/tasks/{task_id}/stream-status")
-async def stream_task_status(task_id: str, request: Request):
-    """Endpoint to stream task status updates using SSE."""
-    if task_id not in fake_tasks_db:
-        raise HTTPException(status_code=404, detail="Task not found for SSE streaming.")
-    return StreamingResponse(sse_task_status_generator(task_id, request), media_type="text/event-stream")
-
-
+    
+    # Обновляем задачу с результатами
+    if task_id in fake_tasks_db:
+        fake_tasks_db[task_id]["status"] = "completed"
+        fake_tasks_db[task_id]["completed_at"] = datetime.utcnow()
+        fake_tasks_db[task_id]["results"] = results

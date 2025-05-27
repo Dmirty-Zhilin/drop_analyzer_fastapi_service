@@ -26,6 +26,21 @@ class DomainAnalysisResult(BaseModel):
     domain_name: str
     # Wayback Machine data
     wayback_history_summary: Optional[Dict[str, Any]] = None
+    # Detailed Wayback metrics
+    has_snapshot: Optional[bool] = None
+    availability_ts: Optional[str] = None
+    total_snapshots: Optional[int] = None
+    timemap_count: Optional[int] = None
+    first_snapshot: Optional[str] = None
+    last_snapshot: Optional[str] = None
+    avg_interval_days: Optional[float] = None
+    max_gap_days: Optional[int] = None
+    years_covered: Optional[int] = None
+    snapshots_per_year: Optional[str] = None
+    unique_versions: Optional[int] = None
+    is_good: Optional[bool] = None
+    recommended: Optional[bool] = None
+    analysis_time_sec: Optional[float] = None
     # Backlinks data
     backlinks_data: Optional[Dict[str, Any]] = None
     # Traffic data

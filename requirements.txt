@@ -6,4 +6,8 @@ redis
 aiohttp
 waybackpy==3.0.6
 weasyprint
+pydantic
+pandas
+openpyxl
+xlsxwriter
 # Add other core dependencies here as needed

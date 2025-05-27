@@ -1,8 +1,10 @@
 import asyncio
 import aiohttp
 import os
+import json
 from typing import Dict, Any, Optional
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -11,17 +13,64 @@ if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-# It's good practice to load sensitive keys from environment variables
-# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-# For now, we might use a placeholder or expect it to be set in the environment.
+# Путь к файлу конфигурации для хранения ключа API
+CONFIG_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "config"
+CONFIG_FILE = CONFIG_DIR / "api_keys.json"
+
+# Создаем директорию config, если она не существует
+CONFIG_DIR.mkdir(exist_ok=True)
+
+# Функция для загрузки ключа API из файла конфигурации
+def load_api_key():
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                return config.get('openrouter_api_key')
+    except Exception as e:
+        logger.error(f"Error loading API key from config file: {e}")
+    return None
+
+# Функция для сохранения ключа API в файл конфигурации
+def save_api_key(api_key):
+    try:
+        config = {}
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, 'r') as f:
+                try:
+                    config = json.load(f)
+                except json.JSONDecodeError:
+                    config = {}
+        
+        config['openrouter_api_key'] = api_key
+        
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving API key to config file: {e}")
+        return False
 
 class OpenRouterService:
     def __init__(self, api_key: Optional[str] = None, model_name: str = "openai/gpt-3.5-turbo"):
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        # Приоритет: 1) переданный ключ, 2) ключ из файла конфигурации, 3) переменная окружения
+        self.api_key = api_key or load_api_key() or os.getenv("OPENROUTER_API_KEY")
         if not self.api_key:
             logger.warning("OpenRouter API key is not set. Thematic analysis will not work.")
         self.base_url = "https://openrouter.ai/api/v1"
         self.model_name = model_name
+        
+    def set_api_key(self, api_key: str) -> bool:
+        """Устанавливает и сохраняет ключ API в файл конфигурации"""
+        if not api_key or not isinstance(api_key, str) or api_key.strip() == "":
+            return False
+            
+        # Сохраняем ключ в файл
+        success = save_api_key(api_key)
+        if success:
+            self.api_key = api_key
+            return True
+        return False
 
     async def get_thematic_analysis(self, text_content: str, domain: str) -> Dict[str, Any]:
         """Performs thematic analysis on the given text content using OpenRouter."""
