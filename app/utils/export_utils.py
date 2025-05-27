@@ -1,6 +1,4 @@
-"""
-Улучшенная версия функции экспорта отчетов с исправлениями проблем PDF и обработки временных файлов
-"""
+""" Улучшенная версия функции экспорта отчетов с исправлениями проблем PDF и обработки временных файлов """
 import os
 import io
 import csv
@@ -12,6 +10,9 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from weasyprint import HTML
 
+# Временное хранилище отчетов (в реальном приложении должно быть заменено на базу данных)
+fake_reports_db = {}
+
 # Функция экспорта отчета
 async def export_report(
     report_id: str,
@@ -19,8 +20,7 @@ async def export_report(
     filter_type: Optional[str] = None,
     background_tasks: BackgroundTasks = None
 ):
-    """
-    Экспортирует отчет в выбранном формате (excel, csv, pdf)
+    """ Экспортирует отчет в выбранном формате (excel, csv, pdf)
     с улучшенной обработкой ошибок и временных файлов
     """
     # Получаем данные отчета
@@ -71,12 +71,15 @@ async def export_report(
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, sheet_name='Отчет', index=False)
+            
             # Настройка форматирования
             workbook = writer.book
             worksheet = writer.sheets['Отчет']
             header_format = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1})
+            
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
+            
             # Автоподбор ширины столбцов
             for i, col in enumerate(df.columns):
                 column_width = max(df[col].astype(str).map(len).max(), len(col)) + 2
@@ -85,7 +88,11 @@ async def export_report(
         output.seek(0)
         filename = f"{filename_base}.xlsx"
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers
+        )
     
     elif format.lower() == "csv":
         # Экспорт в CSV с исправленной кодировкой
@@ -94,15 +101,19 @@ async def export_report(
         output.seek(0)
         filename = f"{filename_base}.csv"
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-        return StreamingResponse(io.BytesIO(output.getvalue().encode('utf-8')), media_type="text/csv", headers=headers)
+        return StreamingResponse(
+            io.BytesIO(output.getvalue().encode('utf-8')),
+            media_type="text/csv",
+            headers=headers
+        )
     
     elif format.lower() == "pdf":
         try:
             # Проверка наличия шрифтов
             noto_font_path = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
             wqy_font_path = '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc'
-            
             font_family = ""
+            
             if os.path.exists(noto_font_path):
                 font_family += "'Noto Sans CJK SC', "
             if os.path.exists(wqy_font_path):
@@ -118,32 +129,12 @@ async def export_report(
                     <meta charset="UTF-8">
                     <title>Отчет по доменам</title>
                     <style>
-                        body {{
-                            font-family: {font_family};
-                            margin: 20px;
-                        }}
-                        h1 {{
-                            color: #333;
-                            font-size: 24px;
-                            margin-bottom: 20px;
-                        }}
-                        table {{
-                            width: 100%;
-                            border-collapse: collapse;
-                            margin-bottom: 20px;
-                        }}
-                        th, td {{
-                            border: 1px solid #ddd;
-                            padding: 8px;
-                            text-align: left;
-                        }}
-                        th {{
-                            background-color: #f2f2f2;
-                            font-weight: bold;
-                        }}
-                        tr:nth-child(even) {{
-                            background-color: #f9f9f9;
-                        }}
+                        body {{ font-family: {font_family}; margin: 20px; }}
+                        h1 {{ color: #333; font-size: 24px; margin-bottom: 20px; }}
+                        table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                        th {{ background-color: #f2f2f2; font-weight: bold; }}
+                        tr:nth-child(even) {{ background-color: #f9f9f9; }}
                     </style>
                 </head>
                 <body>
@@ -188,11 +179,12 @@ async def export_report(
                 background_tasks.add_task(cleanup_temp_files)
             
             return FileResponse(
-                pdf_path, 
-                media_type="application/pdf", 
+                pdf_path,
+                media_type="application/pdf",
                 headers=headers,
                 background=BackgroundTasks() if not background_tasks else None
             )
+        
         except Exception as e:
             # Очищаем временные файлы в случае ошибки
             if 'temp_html_path' in locals() and os.path.exists(temp_html_path):
@@ -203,4 +195,7 @@ async def export_report(
             raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}")
     
     else:
-        raise HTTPException(status_code=400, detail=f"Unsupported format: {format}. Supported formats: excel, csv, pdf")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported format: {format}. Supported formats: excel, csv, pdf"
+        )
