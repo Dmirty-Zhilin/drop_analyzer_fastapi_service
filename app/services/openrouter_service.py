@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import os
+import json  # Добавлен импорт json
 from typing import Dict, Any, Optional
 import logging
 
@@ -117,6 +118,5 @@ async def main_test():
     print("Thematic Analysis Result:", analysis)
 
 if __name__ == "__main__":
-    import json # Required for json.loads in the main_test if the LLM responds with JSON string
+    # json уже импортирован в начале файла
     asyncio.run(main_test())
-
