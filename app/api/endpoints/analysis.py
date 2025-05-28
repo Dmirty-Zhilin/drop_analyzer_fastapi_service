@@ -10,6 +10,7 @@ import uuid
 import asyncio
 import logging
 import time
+import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 
 # Настройка логгера
@@ -297,37 +298,39 @@ async def process_analysis_task(task_id: str, domains: List[str], use_test_data:
             # Импортируем модуль анализа
             from app.utils.wayback_analyzer import analyze_domains, analyze_domain
             
-            # Оптимизированный анализ с отслеживанием прогресса
-            async def process_domain(domain, index):
-                try:
-                    # Обновляем прогресс и текущий домен
-                    if task_id in fake_tasks_db:
-                        fake_tasks_db[task_id]["progress"] = (index / total_domains) * 100
-                        fake_tasks_db[task_id]["current_domain"] = domain
-                    
-                    # Анализируем домен
-                    result = await analyze_domain(domain)
-                    
-                    # Добавляем результат в задачу
-                    if task_id in fake_tasks_db and result:
-                        fake_tasks_db[task_id]["results"].append(result)
-                    
-                    return result
-                except Exception as e:
-                    logger.error(f"Error analyzing domain {domain}: {e}")
-                    return None
-            
-            # Создаем задачи для всех доменов
-            tasks = []
-            for i, domain in enumerate(domains):
-                tasks.append(process_domain(domain, i))
-            
-            # Выполняем задачи с ограничением concurrency
-            concurrency = 10  # Увеличено для ускорения
-            for i in range(0, len(tasks), concurrency):
-                batch = tasks[i:i+concurrency]
-                batch_results = await asyncio.gather(*batch)
-                results.extend([r for r in batch_results if r])
+            # Создаем сессию aiohttp для всех запросов
+            async with aiohttp.ClientSession() as session:
+                # Оптимизированный анализ с отслеживанием прогресса
+                async def process_domain(domain, index):
+                    try:
+                        # Обновляем прогресс и текущий домен
+                        if task_id in fake_tasks_db:
+                            fake_tasks_db[task_id]["progress"] = (index / total_domains) * 100
+                            fake_tasks_db[task_id]["current_domain"] = domain
+                        
+                        # Анализируем домен, передавая сессию
+                        result = await analyze_domain(domain, session)
+                        
+                        # Добавляем результат в задачу
+                        if task_id in fake_tasks_db and result:
+                            fake_tasks_db[task_id]["results"].append(result)
+                        
+                        return result
+                    except Exception as e:
+                        logger.error(f"Error analyzing domain {domain}: {e}")
+                        return None
+                
+                # Создаем задачи для всех доменов
+                tasks = []
+                for i, domain in enumerate(domains):
+                    tasks.append(process_domain(domain, i))
+                
+                # Выполняем задачи с ограничением concurrency
+                concurrency = 10  # Увеличено для ускорения
+                for i in range(0, len(tasks), concurrency):
+                    batch = tasks[i:i+concurrency]
+                    batch_results = await asyncio.gather(*batch)
+                    results.extend([r for r in batch_results if r])
         
         # Проверяем результаты
         if not results:
