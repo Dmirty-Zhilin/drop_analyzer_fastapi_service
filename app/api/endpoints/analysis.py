@@ -1,13 +1,16 @@
 """
-Обновленный модуль analysis.py с асинхронной обработкой тяжелых задач и интеграцией улучшенного экспорта
+Обновленный модуль analysis.py с асинхронной обработкой тяжелых задач, 
+оптимизацией скорости и отслеживанием прогресса в реальном времени
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
 import asyncio
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -20,6 +23,9 @@ router = APIRouter()
 
 # Временное хранилище задач (в реальном приложении должно быть заменено на базу данных)
 fake_tasks_db = {}
+
+# Пул потоков для параллельной обработки
+thread_pool = ThreadPoolExecutor(max_workers=10)
 
 @router.get("/", response_model=PaginatedResponse[TaskResponse])
 async def list_tasks(
@@ -35,7 +41,9 @@ async def list_tasks(
             task_name=task_data["task_name"],
             status=task_data["status"],
             created_at=task_data["created_at"],
-            domains_count=len(task_data["domains"])
+            domains_count=len(task_data["domains"]),
+            progress=task_data.get("progress", 0),
+            current_domain=task_data.get("current_domain", None)
         )
         for task_id, task_data in fake_tasks_db.items()
     ]
@@ -63,21 +71,26 @@ async def analyze_domains(
         "status": "pending",
         "created_at": created_at,
         "completed_at": None,
-        "results": []
+        "results": [],
+        "progress": 0,
+        "current_domain": None,
+        "use_test_data": task_data.use_test_data
     }
     
     # Сохраняем задачу в базу данных
     fake_tasks_db[task_id] = task
     
     # Запускаем анализ в фоновом режиме
-    run_in_background(background_tasks, process_analysis_task, task_id, task_data.domains)
+    run_in_background(background_tasks, process_analysis_task, task_id, task_data.domains, task_data.use_test_data)
     
     return TaskResponse(
         id=task_id,
         task_name=task_data.task_name,
         status="pending",
         created_at=created_at,
-        domains_count=len(task_data.domains)
+        domains_count=len(task_data.domains),
+        progress=0,
+        current_domain=None
     )
 
 # Добавляем алиасы для совместимости с фронтендом
@@ -99,10 +112,13 @@ async def get_task_alias(task_id: str):
         task_name=task_data["task_name"],
         status=task_data["status"],
         created_at=task_data["created_at"],
-        completed_at=task_data["completed_at"],
+        completed_at=task_data.get("completed_at"),
         domains_count=len(task_data["domains"]),
         domains=task_data["domains"],
-        results=task_data["results"]
+        results=task_data["results"],
+        progress=task_data.get("progress", 0),
+        current_domain=task_data.get("current_domain"),
+        error=task_data.get("error")
     )
 
 @router.get("/status/{task_id}", response_model=TaskDetailResponse)
@@ -121,10 +137,13 @@ async def get_task_status_alias(task_id: str):
         task_name=task_data["task_name"],
         status=task_data["status"],
         created_at=task_data["created_at"],
-        completed_at=task_data["completed_at"],
+        completed_at=task_data.get("completed_at"),
         domains_count=len(task_data["domains"]),
         domains=task_data["domains"],
-        results=task_data["results"]
+        results=task_data["results"],
+        progress=task_data.get("progress", 0),
+        current_domain=task_data.get("current_domain"),
+        error=task_data.get("error")
     )
 
 # Основной маршрут для получения задачи по ID
@@ -143,10 +162,13 @@ async def get_task(task_id: str):
         task_name=task_data["task_name"],
         status=task_data["status"],
         created_at=task_data["created_at"],
-        completed_at=task_data["completed_at"],
+        completed_at=task_data.get("completed_at"),
         domains_count=len(task_data["domains"]),
         domains=task_data["domains"],
-        results=task_data["results"]
+        results=task_data["results"],
+        progress=task_data.get("progress", 0),
+        current_domain=task_data.get("current_domain"),
+        error=task_data.get("error")
     )
 
 # Алиас, который должен быть после основного маршрута /{task_id}
@@ -166,10 +188,13 @@ async def get_task_status_alias2(task_id: str):
         task_name=task_data["task_name"],
         status=task_data["status"],
         created_at=task_data["created_at"],
-        completed_at=task_data["completed_at"],
+        completed_at=task_data.get("completed_at"),
         domains_count=len(task_data["domains"]),
         domains=task_data["domains"],
-        results=task_data["results"]
+        results=task_data["results"],
+        progress=task_data.get("progress", 0),
+        current_domain=task_data.get("current_domain"),
+        error=task_data.get("error")
     )
 
 @router.get("/export/{report_id}")
@@ -193,7 +218,7 @@ async def get_majestic_data(domain: str):
     """
     # Имитация запроса к API Majestic
     # В реальном приложении здесь должен быть настоящий запрос к API
-    await asyncio.sleep(1)  # Имитация задержки сети
+    await asyncio.sleep(0.2)  # Уменьшена задержка для ускорения работы
     
     # Возвращаем тестовые данные
     return {
@@ -208,21 +233,101 @@ async def get_majestic_data(domain: str):
         }
     }
 
-async def process_analysis_task(task_id: str, domains: List[str]):
+# Функция для генерации тестовых данных
+def generate_test_data(domain: str) -> Dict[str, Any]:
+    """
+    Генерирует тестовые данные для домена
+    """
+    domain_hash = hash(domain)
+    return {
+        "domain": domain,
+        "domain_name": domain,
+        "has_snapshot": bool(domain_hash % 2),
+        "availability_ts": float(time.time() * 1e9) if domain_hash % 2 else None,
+        "total_snapshots": int(200 + 1000 * (domain_hash % 100) / 100),
+        "timemap_count": int(10 + 50 * (domain_hash % 100) / 100),
+        "first_snapshot": datetime.now().replace(year=datetime.now().year - 5).isoformat(),
+        "last_snapshot": datetime.now().isoformat(),
+        "avg_interval_days": float(1 + 10 * (domain_hash % 100) / 100),
+        "max_gap_days": float(30 + 300 * (domain_hash % 100) / 100),
+        "years_covered": float(1 + 9 * (domain_hash % 100) / 100),
+        "snapshots_per_year": {"2020": 100, "2021": 200, "2022": 300, "2023": 400, "2024": 500},
+        "unique_versions": float(100 + 900 * (domain_hash % 100) / 100),
+        "is_good": bool((domain_hash % 10) > 3),
+        "is_long_live": bool((domain_hash % 10) > 7),
+        "recommended": bool((domain_hash % 10) > 5),
+        "analysis_time_sec": float(1 + 5 * (domain_hash % 100) / 100)
+    }
+
+async def process_analysis_task(task_id: str, domains: List[str], use_test_data: bool = False):
     """
     Асинхронная функция для обработки задачи анализа доменов.
-    Использует реальный анализ через Wayback Machine API.
+    Использует реальный анализ через Wayback Machine API или тестовые данные.
+    Отслеживает прогресс и обновляет статус задачи в реальном времени.
     """
-    # Импортируем модуль анализа
-    from app.utils.wayback_analyzer import analyze_domains
-    
     # Обновляем статус задачи
     if task_id in fake_tasks_db:
         fake_tasks_db[task_id]["status"] = "processing"
+        fake_tasks_db[task_id]["progress"] = 0
+        fake_tasks_db[task_id]["results"] = []
+    
+    total_domains = len(domains)
+    results = []
     
     try:
-        # Выполняем реальный анализ доменов через Wayback Machine API
-        results = await analyze_domains(domains, concurrency=5)
+        if use_test_data:
+            # Используем тестовые данные для быстрой демонстрации
+            for i, domain in enumerate(domains):
+                # Обновляем прогресс и текущий домен
+                if task_id in fake_tasks_db:
+                    fake_tasks_db[task_id]["progress"] = (i / total_domains) * 100
+                    fake_tasks_db[task_id]["current_domain"] = domain
+                
+                # Генерируем тестовые данные
+                test_data = generate_test_data(domain)
+                results.append(test_data)
+                
+                # Добавляем результат в задачу
+                if task_id in fake_tasks_db:
+                    fake_tasks_db[task_id]["results"].append(test_data)
+                
+                # Имитация времени обработки
+                await asyncio.sleep(0.2)
+        else:
+            # Импортируем модуль анализа
+            from app.utils.wayback_analyzer import analyze_domains, analyze_domain
+            
+            # Оптимизированный анализ с отслеживанием прогресса
+            async def process_domain(domain, index):
+                try:
+                    # Обновляем прогресс и текущий домен
+                    if task_id in fake_tasks_db:
+                        fake_tasks_db[task_id]["progress"] = (index / total_domains) * 100
+                        fake_tasks_db[task_id]["current_domain"] = domain
+                    
+                    # Анализируем домен
+                    result = await analyze_domain(domain)
+                    
+                    # Добавляем результат в задачу
+                    if task_id in fake_tasks_db and result:
+                        fake_tasks_db[task_id]["results"].append(result)
+                    
+                    return result
+                except Exception as e:
+                    logger.error(f"Error analyzing domain {domain}: {e}")
+                    return None
+            
+            # Создаем задачи для всех доменов
+            tasks = []
+            for i, domain in enumerate(domains):
+                tasks.append(process_domain(domain, i))
+            
+            # Выполняем задачи с ограничением concurrency
+            concurrency = 10  # Увеличено для ускорения
+            for i in range(0, len(tasks), concurrency):
+                batch = tasks[i:i+concurrency]
+                batch_results = await asyncio.gather(*batch)
+                results.extend([r for r in batch_results if r])
         
         # Проверяем результаты
         if not results:
@@ -231,6 +336,7 @@ async def process_analysis_task(task_id: str, domains: List[str]):
             if task_id in fake_tasks_db:
                 fake_tasks_db[task_id]["status"] = "failed"
                 fake_tasks_db[task_id]["error"] = "No results returned from domain analysis"
+                fake_tasks_db[task_id]["progress"] = 0
             return
             
         logger.info(f"Successfully analyzed {len(results)} domains for task {task_id}")
@@ -240,6 +346,7 @@ async def process_analysis_task(task_id: str, domains: List[str]):
         if task_id in fake_tasks_db:
             fake_tasks_db[task_id]["status"] = "failed"
             fake_tasks_db[task_id]["error"] = str(e)
+            fake_tasks_db[task_id]["progress"] = 0
         return
     
     # Обновляем задачу с результатами
@@ -247,3 +354,5 @@ async def process_analysis_task(task_id: str, domains: List[str]):
         fake_tasks_db[task_id]["status"] = "completed"
         fake_tasks_db[task_id]["completed_at"] = datetime.utcnow()
         fake_tasks_db[task_id]["results"] = results
+        fake_tasks_db[task_id]["progress"] = 100
+        fake_tasks_db[task_id]["current_domain"] = None
