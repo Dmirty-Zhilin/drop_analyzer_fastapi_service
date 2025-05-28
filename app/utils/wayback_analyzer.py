@@ -21,6 +21,17 @@ RETRY_COUNT = 3
 DEFAULT_CONCURRENCY = 5  # Ограничение на количество одновременных запросов
 DEFAULT_BATCH_SIZE = 100  # Размер пакета для обработки доменов
 
+# Критерии для long-live доменов (из way2_fixed.py)
+LONG_LIVE_MIN_SNAPSHOTS = 5
+LONG_LIVE_MIN_YEARS = 3
+LONG_LIVE_MAX_AVG_INTERVAL = 90
+LONG_LIVE_MAX_GAP = 180
+LONG_LIVE_MIN_TIMEMAP = 200
+
+# Критерии для рекомендованных доменов (из way2_fixed.py)
+RECOMMENDED_MIN_SNAPSHOTS = 200
+RECOMMENDED_MAX_AVG_INTERVAL = 30
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -88,7 +99,7 @@ async def analyze_domain(domain: str, session: aiohttp.ClientSession, limit: int
     start = datetime.utcnow()
     
     # Availability API
-    avail_params = {"url": domain}
+    avail_params = {"url": f"http://{domain}"}  # Исправление: добавляем протокол http:// к URL
     avail = await safe_request(session, "GET", AVAIL_API, params=avail_params)
     
     if avail and isinstance(avail, dict) and avail.get("archived_snapshots", {}).get("closest"):
@@ -162,7 +173,8 @@ async def analyze_domain(domain: str, session: aiohttp.ClientSession, limit: int
     info["total_snapshots"] = len(records)
     
     # Timemap count
-    tm_text = await safe_request(session, "GET", TIMEMAP_URL.format(url=domain))
+    tm_url = TIMEMAP_URL.format(url=f"http://{domain}")  # Исправление: добавляем протокол http:// к URL
+    tm_text = await safe_request(session, "GET", tm_url)
     info["timemap_count"] = tm_text.count("web/") if tm_text and isinstance(tm_text, str) else 0
     
     # Метрики снимков
@@ -196,44 +208,56 @@ async def analyze_domain(domain: str, session: aiohttp.ClientSession, limit: int
         for k in ("first_snapshot", "last_snapshot", "avg_interval_days", "max_gap_days", "years_covered", "snapshots_per_year", "unique_versions"):
             info[k] = None
     
-    # Оценка домена
+    # Оценка домена по строгим критериям из way2_fixed.py
     try:
-        # Простая оценка на основе метрик
+        # Проверка на long-live домен (все 5 критериев должны выполняться)
+        is_long_live = (
+            info["total_snapshots"] >= LONG_LIVE_MIN_SNAPSHOTS and
+            info.get("years_covered") is not None and info["years_covered"] >= LONG_LIVE_MIN_YEARS and
+            info.get("avg_interval_days") is not None and info["avg_interval_days"] < LONG_LIVE_MAX_AVG_INTERVAL and
+            info.get("max_gap_days") is not None and info["max_gap_days"] < LONG_LIVE_MAX_GAP and
+            info["timemap_count"] > LONG_LIVE_MIN_TIMEMAP
+        )
+        
+        # Проверка на рекомендованный домен (оба критерия должны выполняться)
+        is_recommended = (
+            info["total_snapshots"] >= RECOMMENDED_MIN_SNAPSHOTS and
+            info.get("avg_interval_days") is not None and info["avg_interval_days"] < RECOMMENDED_MAX_AVG_INTERVAL
+        )
+        
+        info["is_long_live"] = is_long_live
+        info["recommended"] = is_recommended
+        
+        # Текстовая сводка на основе критериев
+        if is_long_live and is_recommended:
+            info["assessment_summary"] = "Отличный домен с богатой историей и регулярными снимками. Рекомендуется для использования."
+        elif is_long_live:
+            info["assessment_summary"] = "Хороший домен с долгой историей, но недостаточно частыми снимками для рекомендации."
+        elif is_recommended:
+            info["assessment_summary"] = "Домен с частыми снимками, но недостаточно долгой историей для статуса long-live."
+        else:
+            info["assessment_summary"] = "Домен не соответствует критериям long-live и не рекомендуется."
+        
+        # Сохраняем оценку для совместимости с frontend
         score = 0
         if info["total_snapshots"] > 0:
-            # Больше снимков - лучше
-            score += min(info["total_snapshots"] / 100, 5)  # До 5 баллов за количество снимков
+            if is_long_live:
+                score += 10
+            if is_recommended:
+                score += 10
             
-            # Больше лет охвата - лучше
+            # Дополнительные баллы для градации
+            score += min(info["total_snapshots"] / 100, 5)
             if info["years_covered"]:
-                score += min(info["years_covered"], 5)  # До 5 баллов за годы охвата
-                
-            # Меньше средний интервал - лучше
-            if info["avg_interval_days"] is not None and info["avg_interval_days"] > 0:
-                score += min(365 / info["avg_interval_days"], 5)  # До 5 баллов за частоту снимков
-                
-            # Меньше максимальный разрыв - лучше
-            if info["max_gap_days"] is not None and info["max_gap_days"] > 0:
-                score += min(365 / info["max_gap_days"], 5)  # До 5 баллов за отсутствие больших разрывов
+                score += min(info["years_covered"], 5)
         
         info["assessment_score"] = round(score, 1)
         
-        # Рекомендация на основе оценки
-        info["recommended"] = score >= 10  # Рекомендуем домены с оценкой 10+
-        
-        # Текстовая сводка
-        if score >= 15:
-            info["assessment_summary"] = "Отличный домен с богатой историей и регулярными снимками."
-        elif score >= 10:
-            info["assessment_summary"] = "Хороший домен с достаточной историей."
-        elif score >= 5:
-            info["assessment_summary"] = "Средний домен с ограниченной историей."
-        else:
-            info["assessment_summary"] = "Слабый домен с минимальной историей или её отсутствием."
     except Exception as e:
         logger.error(f"Error calculating assessment for {domain}: {e}")
-        info["assessment_score"] = 0
+        info["is_long_live"] = False
         info["recommended"] = False
+        info["assessment_score"] = 0
         info["assessment_summary"] = "Ошибка при оценке домена."
     
     # Время выполнения
@@ -258,7 +282,7 @@ async def analyze_domains(domains: List[str], concurrency: int = DEFAULT_CONCURR
                     return await analyze_domain(domain, session)
                 except Exception as e:
                     logger.error(f"Error analyzing domain {domain}: {e}")
-                    return {"domain_name": domain, "error": str(e), "total_snapshots": 0, "recommended": False}
+                    return {"domain_name": domain, "error": str(e), "total_snapshots": 0, "recommended": False, "is_long_live": False}
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -276,7 +300,8 @@ async def analyze_domains(domains: List[str], concurrency: int = DEFAULT_CONCURR
                     "domain_name": batch_domains[j],
                     "error": str(result),
                     "total_snapshots": 0,
-                    "recommended": False
+                    "recommended": False,
+                    "is_long_live": False
                 })
             else:
                 all_results.append(result)
