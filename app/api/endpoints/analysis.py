@@ -94,90 +94,15 @@ async def analyze_domains(
         current_domain=None
     )
 
-# Добавляем алиасы для совместимости с фронтендом
-# ВАЖНО: Алиасы должны быть объявлены ДО параметрического маршрута /{task_id}
-
-@router.get("/tasks/{task_id}", response_model=TaskDetailResponse)
-async def get_task_alias(task_id: str):
-    """
-    Алиас для получения детальной информации о задаче анализа по ID.
-    Обеспечивает совместимость с фронтендом, который может использовать этот путь.
-    """
-    if task_id not in fake_tasks_db:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task_data = fake_tasks_db[task_id]
-    
-    return TaskDetailResponse(
-        id=task_id,
-        task_name=task_data["task_name"],
-        status=task_data["status"],
-        created_at=task_data["created_at"],
-        completed_at=task_data.get("completed_at"),
-        domains_count=len(task_data["domains"]),
-        domains=task_data["domains"],
-        results=task_data["results"],
-        progress=task_data.get("progress", 0),
-        current_domain=task_data.get("current_domain"),
-        error=task_data.get("error")
-    )
-
-@router.get("/status/{task_id}", response_model=TaskDetailResponse)
-async def get_task_status_alias(task_id: str):
-    """
-    Алиас для получения статуса задачи анализа по ID.
-    Обеспечивает совместимость с фронтендом, который может использовать этот путь.
-    """
-    if task_id not in fake_tasks_db:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task_data = fake_tasks_db[task_id]
-    
-    return TaskDetailResponse(
-        id=task_id,
-        task_name=task_data["task_name"],
-        status=task_data["status"],
-        created_at=task_data["created_at"],
-        completed_at=task_data.get("completed_at"),
-        domains_count=len(task_data["domains"]),
-        domains=task_data["domains"],
-        results=task_data["results"],
-        progress=task_data.get("progress", 0),
-        current_domain=task_data.get("current_domain"),
-        error=task_data.get("error")
-    )
-
-# Основной маршрут для получения задачи по ID
+# Удаляем старые алиасы и добавляем новые
 @router.get("/{task_id}", response_model=TaskDetailResponse)
+@router.get("/tasks/{task_id}", response_model=TaskDetailResponse)
 async def get_task(task_id: str):
     """
     Получить детальную информацию о задаче анализа по ID.
-    """
-    if task_id not in fake_tasks_db:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task_data = fake_tasks_db[task_id]
-    
-    return TaskDetailResponse(
-        id=task_id,
-        task_name=task_data["task_name"],
-        status=task_data["status"],
-        created_at=task_data["created_at"],
-        completed_at=task_data.get("completed_at"),
-        domains_count=len(task_data["domains"]),
-        domains=task_data["domains"],
-        results=task_data["results"],
-        progress=task_data.get("progress", 0),
-        current_domain=task_data.get("current_domain"),
-        error=task_data.get("error")
-    )
-
-# Алиас, который должен быть после основного маршрута /{task_id}
-@router.get("/{task_id}/status", response_model=TaskDetailResponse)
-async def get_task_status_alias2(task_id: str):
-    """
-    Еще один алиас для получения статуса задачи анализа по ID.
-    Обеспечивает совместимость с фронтендом, который может использовать этот путь.
+    Поддерживает два пути для обратной совместимости:
+    - /{task_id}
+    - /tasks/{task_id}
     """
     if task_id not in fake_tasks_db:
         raise HTTPException(status_code=404, detail="Task not found")

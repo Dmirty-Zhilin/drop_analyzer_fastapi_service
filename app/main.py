@@ -2,34 +2,22 @@
 Улучшенная версия main.py с исправленными CORS настройками для решения проблемы NetworkError
 """
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.api.endpoints import analysis, reports
+from app.utils.error_handlers import ResourceNotFoundError, NetworkError, ServerError
 
 # Создаем приложение FastAPI
 app = FastAPI(title="Drop Domain Analyzer API", version="0.1.0")
 
-# Получаем список разрешенных доменов из переменной окружения или используем значения по умолчанию
-default_origins = [
-    "https://qo8k8k0c48sk080ccwgswocg.alettidesign.ru",  # Основной домен фронтенда
-    "http://qo8k8k0c48sk080ccwgswocg.alettidesign.ru",   # HTTP версия домена фронтенда
-    "http://45.155.207.218:3090",                        # Адрес фронтенда по IP и порту
-    "https://45.155.207.218:3090",                       # HTTPS версия IP адреса
-    "http://localhost:3090",                             # Локальный адрес для разработки
-]
-
-origins = os.getenv("ALLOWED_ORIGINS", ",".join(default_origins)).split(",")
-
-# Добавляем CORS middleware с улучшенными настройками
+# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["https://qo8k8k0c48sk080ccwgswocg.alettidesign.ru"],
     allow_credentials=True,
-    allow_methods=["*"],                                 # Разрешаем все HTTP методы
-    allow_headers=["*"],                                 # Разрешаем все заголовки
-    expose_headers=["Content-Disposition", "Location"],  # Разрешаем доступ к заголовкам редиректа
-    max_age=86400,                                       # Кэширование предзапросов на 24 часа
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Глобальный обработчик исключений
@@ -38,13 +26,46 @@ async def global_exception_handler(request: Request, exc: Exception):
     """
     Глобальный обработчик исключений для предоставления более информативных сообщений об ошибках
     """
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": f"Внутренняя ошибка сервера: {str(exc)}",
-            "type": type(exc).__name__
-        }
-    )
+    if isinstance(exc, ResourceNotFoundError):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": str(exc),
+                "type": "ResourceNotFoundError"
+            }
+        )
+    elif isinstance(exc, NetworkError):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": str(exc),
+                "type": "NetworkError"
+            }
+        )
+    elif isinstance(exc, ServerError):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": str(exc),
+                "type": "ServerError"
+            }
+        )
+    elif isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "detail": exc.detail,
+                "type": "HTTPException"
+            }
+        )
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": f"Внутренняя ошибка сервера: {str(exc)}",
+                "type": type(exc).__name__
+            }
+        )
 
 @app.get("/", tags=["Root"])
 async def read_root():
